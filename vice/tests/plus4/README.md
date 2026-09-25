@@ -149,8 +149,18 @@ warning, so a store whose last read followed BA completed during the DMA:
 Return to Promised Land's `STA $ff07` after a forced bad line landed at
 cycle 11 instead of 95, and that line showed a row of dots. TED now records
 where each CPU write ends; a write whose previous access ended there follows
-a write, any other follows a read. Both TED register and 16/32/64 KiB
-video-RAM write paths use `ted_dma_halts_cpu()`. The tests compile the
+a write, any other follows a read. FPGATED drops BA at dot 407 (cycle 3.75)
+and advances THALT1-3 at single clock ends, so the access in slot 3
+completes and a read in slot 5 or later stops; YapeSDL traces of Lykia's
+title show the same slots. The check is made on the bus slot of the write,
+after the single clock stretch that VICE applies per instruction. The
+16/32/64 KiB video-RAM write paths used the clock before the stretch, which
+is one or more CPU slots early for an instruction crossing slot 4 (a store
+whose last read is in slot 5 escaped the halt); they now serve TED events
+through the same path as register writes. The CPU core issues the stack
+pushes of JSR, BRK and interrupts at one clock, so such a write can be
+rewound before the last stretch; `ted_delay_clk()` leaves it alone instead
+of wrapping the clock difference. The tests compile the
 production register, fetch and clock handlers, substituting only DMA/alarm
 sinks and unused drawing functions.
 

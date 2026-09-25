@@ -142,11 +142,24 @@ int main(void)
         ted_handle_pending_alarms(0);
         assert(fetches == 1);
 
+        /* The halt is decided on the bus slot of the write, after the
+           single clock stretch, as for register writes: the read before
+           this write is in slot 5, after BA. */
         setup();
-        maincpu_clk += 4;
+        maincpu_clk += 3;
         stores[i](0x1234, 0x42);
         assert(fetches == 1);
         assert(mem_ram[0x1234] == 0x42);
+
+        /* JSR, BRK and interrupts push two bytes at one core clock: the
+           second push must not stretch the clock again. */
+        setup();
+        maincpu_clk += 1;
+        stores[i](0x0100, 0x12);
+        assert(maincpu_clk == 5);
+        stores[i](0x01ff, 0x34);
+        assert(maincpu_clk == 5);
+        assert(mem_ram[0x0100] == 0x12 && mem_ram[0x01ff] == 0x34);
     }
 
     /* Resetting the live line after attribute DMA must still copy its

@@ -216,7 +216,10 @@ void ted_delay_clk(void)
 {
     CLOCK diff;
 
-    if (maincpu_clk == old_maincpu_clk) {
+    /* The CPU core issues the stack pushes of JSR, BRK and interrupts at
+       one clock, so a write rewound by `ted_handle_pending_alarms()' can be
+       before the last stretch.  Its cycles are already accounted for.  */
+    if (maincpu_clk <= old_maincpu_clk) {
         return;
     }
 

@@ -90,13 +90,17 @@ void ted_change_timing(machine_timing_t *machine_timing, int bordermode)
     ted_color_update_palette(ted.raster.canvas);
 }
 
-/* Return non-zero if TED's DMA request halts the CPU before its access at
-   `clk', which precedes a write.  BA goes low at `fetch_clk'; the read in
-   the single clock in which it falls still completes, and RDY stops the
-   7501 at its next read, which waits for the end of the DMA.  During the
-   three single clocks of BA warning (`TED_DMA_BUS_DELAY'), before TED owns
-   the bus, only writes continue: a write that follows another write (the
-   two RMW writes, stack pushes) completes.  */
+/* Return non-zero if TED's DMA request halts the CPU before its write at
+   `clk', the bus slot of the write after the single clock stretch.  BA
+   falls in the single clock made of the TED slot `fetch_clk' and the CPU
+   slot after it: the CPU access in the slot before `fetch_clk' completes,
+   and RDY stops the 7501 at its first read after it until the end of the
+   DMA.  In single clock the CPU slots are two clocks apart, so the read
+   before a write at `clk' is after `fetch_clk' when `clk' is at least two
+   clocks after it.  During the three single clocks of BA warning
+   (`TED_DMA_BUS_DELAY'), before TED owns the bus, only writes continue: a
+   write that follows another write (the two RMW writes, stack pushes)
+   completes.  */
 int ted_dma_halts_cpu(CLOCK clk, int after_write)
 {
     if (clk < ted.fetch_clk || clk - ted.fetch_clk < 2) {
