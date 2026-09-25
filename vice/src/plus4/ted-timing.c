@@ -27,7 +27,7 @@
 
 #include "vice.h"
 
-#include "dma.h"
+#include "interrupt.h"
 #include "maincpu.h"
 #include "machine.h"
 #include "plus4.h"
@@ -153,6 +153,25 @@ void ted_delay_resync(void)
     old_cycle = TED_RASTER_CYCLE(maincpu_clk);
 }
 
+/* Single clock slows the CPU clock down, it does not halt the CPU: BA is
+   only asserted for DMA.  The CPU keeps sampling IRQ and NMI on each of
+   its cycles, so these clocks must not be accounted as a DMA halt by
+   `dma_maincpu_steal_cycles()'.  That would move an interrupt raised
+   before the stretched clocks (e.g. the raster IRQ at the start of the
+   line) to their end, delaying it by one more instruction.  */
+static void ted_stretch_cpu_clk(CLOCK num)
+{
+    interrupt_cpu_status_t *cs = maincpu_int_status;
+
+    if (num == 0) {
+        return;
+    }
+
+    maincpu_clk += num;
+    cs->irq_clk += num;
+    cs->nmi_clk += num;
+}
+
 void ted_delay_clk(void)
 {
     CLOCK diff;
@@ -163,7 +182,7 @@ void ted_delay_clk(void)
 
     if (ted.fastmode == 0) {
         diff = maincpu_clk - old_maincpu_clk - ((old_cycle & 1) ^ 1);
-        dma_maincpu_steal_cycles(maincpu_clk, diff, 0);
+        ted_stretch_cpu_clk(diff);
     } else {
 fastloop:
         diff = maincpu_clk - old_maincpu_clk;
@@ -185,7 +204,7 @@ fastloop:
                 if (diff > max) {
                     diff = max;
                 }
-                dma_maincpu_steal_cycles(maincpu_clk, diff, 0);
+                ted_stretch_cpu_clk(diff);
             } else if (old_cycle + diff >= 118) {
                 /* Instruction crosses into next line, and potentially
                    crossing into area where clocking changes.
@@ -215,7 +234,7 @@ fastloop:
                 if (diff > max) {
                     diff = max;
                 }
-                dma_maincpu_steal_cycles(maincpu_clk, diff, 0);
+                ted_stretch_cpu_clk(diff);
             } else if (old_cycle + diff >= 118) {
                 /* Instruction crosses into next line, and potentially
                    crossing into area where clocking changes.

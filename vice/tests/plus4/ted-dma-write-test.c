@@ -10,6 +10,8 @@
 CLOCK maincpu_clk;
 int maincpu_rmw_flag;
 uint8_t mem_ram[0x10000];
+static interrupt_cpu_status_t int_status;
+interrupt_cpu_status_t *maincpu_int_status = &int_status;
 static unsigned int fetches;
 static unsigned int drawn_lines;
 static alarm_context_t context;
@@ -26,11 +28,6 @@ void ted_counter_update(CLOCK clk)
 
 void ted_fetch_store(uint16_t addr, uint8_t old_value, unsigned int ram_mask)
 {
-}
-
-void dma_maincpu_steal_cycles(CLOCK start, CLOCK num, CLOCK sub)
-{
-    maincpu_clk += num;
 }
 
 void ted_fetch_alarm_handler(CLOCK offset, void *data)

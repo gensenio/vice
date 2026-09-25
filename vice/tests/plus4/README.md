@@ -158,6 +158,31 @@ TED snapshot version 1.11 saves the DMA scanline and bitmap-position latch.
 Older snapshots approximate them from the live raster and row counters;
 they cannot recover a latch that differed after a register write.
 
+## Single clock and interrupt timing
+
+```sh
+sh tests/plus4/run-clock-test.sh /path/to/configured/build
+```
+
+Single clock halves the CPU clock; it does not halt the CPU (BA is asserted
+only for DMA). `ted_delay_clk()` applies the stretched clocks when an
+instruction ends, and accounted them with `dma_maincpu_steal_cycles()`. An
+interrupt raised before those clocks but dispatched after them, typically the
+raster IRQ at the start of a line when an instruction crosses into the
+single-clock window, was then moved to the end of a supposed DMA halt and
+taken one instruction late. The stretch now advances the CPU clock and the
+pending interrupt clocks without recording a DMA halt.
+
+Lykia 1.4's title screen enters its raster IRQ through a 14-entry
+`$FF1E`/`CMP #$C9` stabilizer (offsets 0–13). With the defect, 6 of 7506
+traced frames entered at offset 14; the first FLI write came one cycle early
+and the routine lost sync for that frame. With the correction, 11236 frames entered at
+offsets 5–11, and the first FLI write always fell on the same cycle. FPGATED
+generates the CPU clock as `phi` in single clock and asserts BA only for DMA.
+plus4emu counts its interrupt delay in CPU cycles and halts the CPU only for
+DMA, and YapeSDL counts its IRQ delay in CPU cycles. The test checks that
+the stretch moves pending interrupt clocks and records no DMA.
+
 ## Masked raster compare events
 
 ```sh
