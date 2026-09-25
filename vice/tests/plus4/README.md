@@ -453,6 +453,30 @@ the middle of line 100 (vertical scroll 0 keeps it free of DMA). Line 99 must
 be unscrolled, line 101 scrolled, and line 100 unscrolled on the left and
 scrolled on the right. The previous build scrolled only from line 101.
 
+## Reverse/256 character bit
+
+```sh
+sh tests/plus4/run-reverse-test.sh /path/to/configured/build
+```
+
+`$ff07` bit 7 selects whether bit 7 of the character code reverses the
+character or addresses 256 characters. VICE changed the character set
+address it implies from the next character (`ted_update_memory_ptrs()`), but
+set the reverse flag itself immediately, so the whole line was drawn with it
+at cycle 114. YapeSDL applies it at each character fetch (`rvsmode` in the
+address mask) and plus4emu one cycle after the write (`updateVideoMode`). It
+is now queued on the character-granular foreground list with the same
+position as the address change: from the next character within the window,
+from the next line after it.
+
+Return to Promised Land's opening switches between a RAM character set with
+256 characters and the ROM set with reverse characters at cycles 91-111 of a
+line, after the window. The line of each switch was drawn with the new
+reverse flag and the old character set: a line of reversed spaces in the
+text colour above the shrinking BASIC screen and a blank line of its white
+background below it. The test writes both directions at every cycle. The
+snapshot loader now also restores the flag from `$ff07`.
+
 ## Attribute DMA requested in the middle of a line
 
 ```sh

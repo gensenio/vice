@@ -319,6 +319,7 @@ int ted_snapshot_read_module(snapshot_t *s)
     ted_update_memory_ptrs(TED_RASTER_CYCLE(maincpu_clk));
 
     ted.raster.xsmooth = ted.regs[0x07] & 0x7;
+    ted.reverse_mode = ted.regs[0x07] & 0x80;
     ted.raster.ysmooth = ted.regs[0x06] & 0x7;
     ted.raster.current_line = TED_RASTER_Y(maincpu_clk); /* FIXME? */
 
