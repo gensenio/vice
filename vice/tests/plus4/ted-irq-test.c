@@ -18,6 +18,7 @@ static void test_irq(interrupt_cpu_status_t *cs, unsigned int int_num,
 #define interrupt_set_irq test_irq
 #include "../../src/plus4/ted-irq.c"
 #include "../../src/plus4/ted-mem.c"
+#include "../../src/plus4/ted-timing.c"
 
 ted_t ted;
 CLOCK maincpu_clk;
@@ -49,6 +50,7 @@ static void setup(unsigned int line, unsigned int compare)
     context.next_pending_alarm_clk = CLOCK_MAX;
     ted.raster_irq_alarm = &raster_alarm;
     ted.cycles_per_line = 114;
+    ted.fastmode = 1;
     ted.screen_height = 312;
     ted.ted_raster_counter = line;
     ted.raster_irq_line = compare;
@@ -104,6 +106,15 @@ int main(void)
     assert((ted.irq_status & 0x8a) == 0x88);
     ted09_store(8);
     assert(irq_line == 0);
+
+    /* In single clock the CPU core's two-clock delay must end after the
+       second CPU cycle (slots 23 and 25), not after two clocks. */
+    setup(42, 41);
+    ted.character_fetch_on = 1;
+    ted.regs[0x0a] = 2;
+    ted_irq_raster_set(22);
+    assert(irq_line == 1);
+    assert(irq_clk == 24);
 
     puts("TED raster IRQ mask tests passed");
     return 0;

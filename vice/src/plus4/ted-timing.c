@@ -153,23 +153,63 @@ void ted_delay_resync(void)
     old_cycle = TED_RASTER_CYCLE(maincpu_clk);
 }
 
+/* Return non-zero if the CPU runs a cycle in clock slot `cycle' of the
+   line.  In single clock TED takes the even slots, see `ted_delay_clk()'.  */
+static int ted_cpu_slot(unsigned int cycle)
+{
+    if (ted.fastmode == 0) {
+        return cycle & 1;
+    }
+
+    if (((cycle & 1) == 0) && (cycle <= 100)
+        && (cycle >= (ted.character_fetch_on ? 4U : 92U))) {
+        return 0;
+    }
+    return 1;
+}
+
+/* The 7501 takes an interrupt at an opcode fetch once the request has been
+   seen during two of its cycles.  The CPU core counts `INTERRUPT_DELAY'
+   clocks instead, which are only two CPU cycles at double clock.  Return
+   the interrupt clock to pass to the core for a request raised at `clk',
+   so that the core's delay ends after the second CPU cycle from `clk'.
+   Horizontal counter overflow (`$FF1E' writes) is not taken into account.  */
+CLOCK ted_delay_irq_clk(CLOCK clk)
+{
+    CLOCK line_clk = ted.last_emulate_line_clk;
+    unsigned int cycle;
+    int cpu_cycles;
+
+    if (clk >= line_clk) {
+        cycle = (unsigned int)((clk - line_clk) % ted.cycles_per_line);
+    } else {
+        cycle = (unsigned int)((ted.cycles_per_line
+                                - (line_clk - clk) % ted.cycles_per_line)
+                               % ted.cycles_per_line);
+    }
+
+    /* Find the slot of the second CPU cycle from `clk'.  */
+    cpu_cycles = ted_cpu_slot(cycle);
+    while (cpu_cycles < 2) {
+        clk++;
+        cycle = (cycle + 1) % ted.cycles_per_line;
+        cpu_cycles += ted_cpu_slot(cycle);
+    }
+
+    return clk + 1 - INTERRUPT_DELAY;
+}
+
 /* Single clock slows the CPU clock down, it does not halt the CPU: BA is
    only asserted for DMA.  The CPU keeps sampling IRQ and NMI on each of
    its cycles, so these clocks must not be accounted as a DMA halt by
    `dma_maincpu_steal_cycles()'.  That would move an interrupt raised
    before the stretched clocks (e.g. the raster IRQ at the start of the
-   line) to their end, delaying it by one more instruction.  */
+   line) to their end, delaying it by one more instruction.  Pending
+   interrupt clocks are not moved either: `ted_delay_irq_clk()' already
+   counts the CPU cycles from the request.  */
 static void ted_stretch_cpu_clk(CLOCK num)
 {
-    interrupt_cpu_status_t *cs = maincpu_int_status;
-
-    if (num == 0) {
-        return;
-    }
-
     maincpu_clk += num;
-    cs->irq_clk += num;
-    cs->nmi_clk += num;
 }
 
 void ted_delay_clk(void)

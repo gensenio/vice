@@ -143,10 +143,11 @@ typedef enum ted_video_mode_s ted_video_mode_t;
 #define TED_BLINK_LINE              205
 #define TED_BLINK_CYCLE             104
 
-/* Delay for the raster line interrupt.  This is not due to the TED, since
-   it triggers the IRQ line at the beginning of the line, but to the 7501
-   that needs at least 2 cycles to detect it.  */
-#define TED_RASTER_IRQ_DELAY        2 /* FIXME!!! */
+/* Cycle at which TED raises the raster interrupt, on every line including
+   line 0.  YapeSDL and plus4emu raise it here, when the line counter has
+   changed; FPGATED one cycle earlier.  The 7501's own delay is applied by
+   `ted_delay_irq_clk()'.  */
+#define TED_RASTER_IRQ_CYCLE        0
 
 /* Current char being drawn by the raster.  < 0 or >= TED_SCREEN_TEXTCOLS
    if outside the visible range.  */
@@ -421,6 +422,7 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data);
 void ted_delay_clk(void);
 void ted_delay_oldclk(CLOCK num);
 void ted_delay_resync(void);
+CLOCK ted_delay_irq_clk(CLOCK clk);
 
 /* Debugging options.  */
 
