@@ -27,6 +27,13 @@ its code into VICE. Distinguish implementation choices from documented
 hardware behavior. This exception does not authorize plus4emu
 or unrelated emulator research.
 
+On 2026-09-25 the user authorized analyzing the YapeSDL and plus4emu sources,
+together with the TED technical documentation, to fix xplus4 emulation. This
+supersedes the exclusions above for those two emulators. Where they agree with
+each other and with the documentation, their behavior may guide a fix; record
+disagreements and implementation choices instead of treating either emulator
+as silicon. Reimplement behavior in VICE's style; do not paste their code.
+
 Implement changes in the existing VICE coding style and architecture. Keep
 fixes general to the emulated hardware, without game-specific workarounds.
 

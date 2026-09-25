@@ -237,43 +237,45 @@ void ted_mem_vbank_3fxx_store(uint16_t addr, uint8_t value)
 inline static void check_lower_upper_border(const uint8_t value,
                                             unsigned int line, int cycle)
 {
-    if ((value ^ ted.regs[0x06]) & 8) {
-        if (value & 0x8) {
-            /* 24 -> 25 row mode switch.  */
+    int window;
+    int start_cycle;
 
-            if (line == ted.row_24_stop_line && cycle > 0) {
-                /* If on the first line of the 24-line border, we
-                   still see the 25-line (lowmost) border because the
-                   border flip flop has already been turned on.  */
-                ted.raster.blank_enabled = 1;
-            } else {
-                if (!ted.raster.blank && line == ted.row_24_start_line
-                    && cycle > 0) {
-                    /* A 24 -> 25 switch somewhere on the first line of
-                       the 24-row mode is enough to disable screen
-                       blanking.  */
-                    ted.raster.blank_enabled = 0;
-                }
-            }
-            TED_DEBUG_REGISTER(("25 line mode enabled"));
-        } else {
-            /* 25 -> 24 row mode switch.  */
-
-            /* If on the last line of the 25-line border, we still see the
-               24-line (upmost) border because the border flip flop has
-               already been turned off.  */
-            if (!ted.raster.blank && line == ted.row_25_start_line
-                && (cycle > 0)) {
-                ted.raster.blank_enabled = 0;
-            } else {
-                if ((line == ted.row_25_stop_line) && (cycle > 0)) {
-                    ted.raster.blank_enabled = 1;
-                }
-            }
-
-            TED_DEBUG_REGISTER(("24 line mode enabled"));
-        }
+    if (!((value ^ ted.regs[0x06]) & 0x18)) {
+        return;
     }
+
+    /* The vertical window opens on line 4 (25 rows) or 8 (24 rows) and
+       closes on line 200 (24 rows) or 204 (25 rows).  Besides the test at
+       each line change, changing RSEL or DEN on one of these lines applies
+       the test of that line with the new value.  The line number used for
+       the test is incremented at cycle 112, before the line ends.  */
+    if (cycle >= TED_LINE_LATCH_CYCLE) {
+        line = (line + 1) % ted.screen_height;
+    }
+    if (line == ted.row_25_start_line && (value & 0x18) == 0x18) {
+        window = 1;
+    } else if (line == ted.row_24_start_line && (value & 0x18) == 0x10) {
+        window = 1;
+    } else if (line == ted.row_24_stop_line + 1 && !(value & 8)) {
+        window = 0;
+    } else if (line == ted.row_25_stop_line + 1 && (value & 8)) {
+        window = 0;
+    } else {
+        return;
+    }
+
+    /* The side border flip-flop consults the window only at the start of
+       the display, so a later change affects the following line.  */
+    start_cycle = (ted.regs[0x07] & 8) ? TED_40COL_START_CYCLE
+                                       : TED_38COL_START_CYCLE;
+    if (cycle < start_cycle) {
+        ted.raster.blank_enabled = !window;
+    } else {
+        raster_changes_next_line_add_int(&ted.raster,
+                                         &ted.raster.blank_enabled, !window);
+    }
+
+    TED_DEBUG_REGISTER(("Vertical window %s", window ? "opened" : "closed"));
 }
 
 inline static void ted06_store(const uint8_t value)
@@ -329,55 +331,46 @@ inline static void ted06_store(const uint8_t value)
 inline static void check_lateral_border(const uint8_t value, int cycle,
                                         raster_t *raster)
 {
-    if ((value & 0x8) != (ted.regs[0x07] & 0x8)) {
-        if (value & 0x8) {
-            /* 40 column mode.  */
-            if (cycle <= 17) {
-                raster->display_xstart = TED_40COL_START_PIXEL;
-            } else {
-                raster_changes_next_line_add_int(raster,
-                                                 &raster->display_xstart,
-                                                 TED_40COL_START_PIXEL);
-            }
-            if (cycle <= 56) {
-                raster->display_xstop = TED_40COL_STOP_PIXEL;
-            } else {
-                raster_changes_next_line_add_int(raster,
-                                                 &raster->display_xstop,
-                                                 TED_40COL_STOP_PIXEL);
-            }
-            TED_DEBUG_REGISTER(("40 column mode enabled"));
+    int start, stop;
 
-            /* If CSEL changes from 0 to 1 at cycle 17, the border is
-               not turned off and this line is blank.  */
-            if ((cycle == 17) && !(ted.regs[0x07] & 0x8)) {
-                raster->blank_this_line = 1;
-            }
-        } else {
-            /* 38 column mode.  */
-            if (cycle <= 17) {
-                raster->display_xstart = TED_38COL_START_PIXEL;
-            } else {
-                raster_changes_next_line_add_int(raster,
-                                                 &raster->display_xstart,
-                                                 TED_38COL_START_PIXEL);
-            }
-            if (cycle <= 56) {
-                raster->display_xstop = TED_38COL_STOP_PIXEL;
-            } else {
-                raster_changes_next_line_add_int(raster,
-                                                 &raster->display_xstop,
-                                                 TED_38COL_STOP_PIXEL);
-            }
-            TED_DEBUG_REGISTER(("38 column mode enabled"));
+    if (!((value ^ ted.regs[0x07]) & 0x8)) {
+        return;
+    }
 
-            /* If CSEL changes from 1 to 0 at cycle 56, the lateral
-               border is open.  */
-            if ((cycle == 56) && (ted.regs[0x07] & 0x8)
-                && (!raster->blank_enabled || raster->open_left_border)) {
-                raster->open_right_border = 1;
-            }
+    if (value & 0x8) {
+        start = TED_40COL_START_PIXEL;
+        stop = TED_40COL_STOP_PIXEL;
+        TED_DEBUG_REGISTER(("40 column mode enabled"));
+    } else {
+        start = TED_38COL_START_PIXEL;
+        stop = TED_38COL_STOP_PIXEL;
+        TED_DEBUG_REGISTER(("38 column mode enabled"));
+    }
+
+    if (cycle < TED_40COL_START_CYCLE) {
+        raster->display_xstart = start;
+    } else {
+        /* Switching from 38 to 40 columns between the two start tests
+           makes both tests fail, so this line stays in the border.  */
+        if (cycle < TED_38COL_START_CYCLE && (value & 0x8)) {
+            raster->blank_this_line = 1;
         }
+        raster_changes_next_line_add_int(raster, &raster->display_xstart,
+                                         start);
+    }
+
+    if (cycle < TED_38COL_STOP_CYCLE) {
+        raster->display_xstop = stop;
+    } else {
+        /* Switching from 40 to 38 columns between the two stop tests makes
+           both tests fail: the display continues into the next line.  */
+        if (cycle < TED_40COL_STOP_CYCLE && !(value & 0x8)
+            && ((!raster->blank_enabled && !raster->blank_this_line)
+                || raster->open_left_border)) {
+            raster->open_right_border = 1;
+        }
+        raster_changes_next_line_add_int(raster, &raster->display_xstop,
+                                         stop);
     }
 }
 
@@ -392,22 +385,17 @@ inline static void ted07_store(uint8_t value)
     raster = &ted.raster;
     cycle = TED_RASTER_CYCLE(maincpu_clk);
 
-    /* FIXME: Line-based emulation!  */
     if ((value & 7) != (ted.regs[0x07] & 7)) {
-#if 1
-        if (TED_RASTER_CHAR(cycle) <= 1) {
-            raster->xsmooth = value & 0x7;
-        } else {
-            raster_changes_next_line_add_int(raster,
-                                             &raster->xsmooth,
-                                             value & 0x7);
-        }
-#else
+        /* The shift register uses the new scroll from the next character
+           load: character i is output during cycles 16 + 2 * i and
+           17 + 2 * i.  Later characters move, leaving the background
+           colour in the gap or overlapping the preceding character.  The
+           exact pixel within a character is not modelled.  */
         raster_changes_foreground_add_int(raster,
-                                          TED_RASTER_CHAR(cycle),
+                                          cycle < TED_40COL_START_CYCLE ? 0
+                                          : (cycle - TED_40COL_START_CYCLE) / 2 + 1,
                                           &raster->xsmooth,
                                           value & 7);
-#endif
     }
 
     /* Bit 4 (CSEL) selects 38/40 column mode.  */
@@ -780,11 +768,23 @@ inline static void ted1e_store(uint8_t value)
     ted_counter_store(value);
 }
 
+/* Nonzero after the blink counter was incremented on its line, until the
+   end-of-line handler applies the increment.  */
+inline static int ted_blink_pending(void)
+{
+    return TED_RASTER_Y(maincpu_clk) == TED_BLINK_LINE
+           && TED_RASTER_CYCLE(maincpu_clk) >= TED_BLINK_CYCLE;
+}
+
 inline static void ted1f_store(uint8_t value)
 {
     int current_cursor_phase;
     int new_cursor_count;
+    int pending = ted_blink_pending();
 
+    /* Write over the already incremented counter, then leave the pending
+       increment to the end-of-line handler. */
+    ted.cursor_phase = (ted.cursor_phase + pending) & 0x1f;
     new_cursor_count = (value >> 3) & 0x0f;
     current_cursor_phase = ted.cursor_phase & 0x10;
 
@@ -793,6 +793,7 @@ inline static void ted1f_store(uint8_t value)
     }
     ted.cursor_phase = current_cursor_phase | new_cursor_count;
     ted.cursor_visible = ted.cursor_phase & 0x10;
+    ted.cursor_phase = (ted.cursor_phase - pending) & 0x1f;
     /* Keep the CPU-visible counter current without changing pixels that
        have already passed through the video shift register. */
     raster_changes_foreground_add_int(&ted.raster,
@@ -1014,7 +1015,9 @@ inline static uint8_t ted1e_read(void)
 
 inline static uint8_t ted1f_read(void)
 {
-    return 0x80 | ((ted.cursor_phase & 0x0f) << 3) | ted.raster.ycounter;
+    int phase = ted.cursor_phase + ted_blink_pending();
+
+    return 0x80 | ((phase & 0x0f) << 3) | ted.raster.ycounter;
 }
 
 /* Read a value from a TED register.  */

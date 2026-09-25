@@ -414,6 +414,13 @@ void ted_powerup(void)
 
 /* ---------------------------------------------------------------------*/
 
+/* Idle fetches read $ffff with the ROM/RAM selection of the DMA fetches
+   ($ff13 bit 0), normally the last byte of the Kernal ROM.  */
+static uint8_t ted_idle_fetch(void)
+{
+    return mem_get_tedmem_base(3 | ((ted.regs[0x13] & 1) << 2))[0x3fff];
+}
+
 /* Set the memory pointers according to the values in the registers.  */
 void ted_update_memory_ptrs(unsigned int cycle)
 {
@@ -473,19 +480,11 @@ void ted_update_memory_ptrs(unsigned int cycle)
 
     tmp = TED_RASTER_CHAR(cycle);
 
-    /* FIXME */
     if (ted.idle_data_location != IDLE_NONE) {
-        if (ted.idle_data_location == IDLE_39FF) {
-            raster_changes_foreground_add_int(&ted.raster,
-                                              TED_RASTER_CHAR(cycle),
-                                              &ted.idle_data,
-                                              mem_ram[0x39ff]);
-        } else {
-            raster_changes_foreground_add_int(&ted.raster,
-                                              TED_RASTER_CHAR(cycle),
-                                              &ted.idle_data,
-                                              mem_ram[0x3fff]);
-        }
+        raster_changes_foreground_add_int(&ted.raster,
+                                          TED_RASTER_CHAR(cycle),
+                                          &ted.idle_data,
+                                          ted_idle_fetch());
     }
 
     if (tmp <= 0 && maincpu_clk < ted.draw_clk) {
@@ -597,15 +596,9 @@ void ted_update_video_mode(unsigned int cycle)
                                               new_video_mode);
 
             if (ted.idle_data_location != IDLE_NONE) {
-                if (ted.regs[0x06] & 0x40) {
-                    raster_changes_foreground_add_int
-                        (&ted.raster, pos, (void *)&ted.idle_data,
-                        mem_ram[0xffff]);
-                } else {
-                    raster_changes_foreground_add_int
-                        (&ted.raster, pos, (void *)&ted.idle_data,
-                        mem_ram[0xffff]);
-                }
+                raster_changes_foreground_add_int
+                    (&ted.raster, pos, (void *)&ted.idle_data,
+                    ted_idle_fetch());
             }
         }
 
@@ -682,6 +675,14 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
         && ted.ted_raster_counter < ted.last_dma_line
         && (ted.ted_raster_counter & 7) == (unsigned int)ted.raster.ysmooth;
 
+    /* The blink counter advances on its line, not at vertical sync, so
+       raster-counter writes that skip or repeat the line change its rate.
+       Reads and writes after TED_BLINK_CYCLE account for it until here. */
+    if (ted.ted_raster_counter == TED_BLINK_LINE) {
+        ted.cursor_phase = (ted.cursor_phase + 1) & 0x1f;
+        ted.cursor_visible = ted.cursor_phase & 0x10;
+    }
+
     ted.tv_current_line++;
     ted.ted_raster_counter++;
     if (ted.ted_raster_counter == ted.screen_height) {
@@ -744,11 +745,6 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
         vsync_do_vsync(ted.raster.canvas);
 
         ted.tv_current_line = 0;
-
-        /* FIXME increment at appropriate cycle */
-        ted.cursor_phase = (ted.cursor_phase + 1) & 0x1f;
-        ted.cursor_visible = ted.cursor_phase & 0x10;
-
     }
 
     ted.mem_counter_inc = TED_SCREEN_TEXTCOLS;
@@ -773,15 +769,9 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
     if (ted.matrix_fetch_pending) {
         memcpy(ted.cbuf, ted.cbuf_tmp, ted.mem_counter_inc);
     }
-    /* FIXME */
     if (ted.idle_state) {
-        if (ted.regs[0x6] & 0x40) {
-            ted.idle_data_location = IDLE_39FF;
-            ted.idle_data = mem_ram[0xffff];
-        } else {
-            ted.idle_data_location = IDLE_3FFF;
-            ted.idle_data = mem_ram[0xffff];
-        }
+        ted.idle_data_location = IDLE_3FFF;
+        ted.idle_data = ted_idle_fetch();
     } else {
         ted.idle_data_location = IDLE_NONE;
     }

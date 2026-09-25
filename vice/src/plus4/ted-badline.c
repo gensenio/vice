@@ -57,139 +57,73 @@ inline static void line_becomes_good(int cycle)
     }
 }
 
-/* FIXME: dead code? */
-#if 0
-inline static void line_becomes_bad(int cycle)
+/* The line becomes an attribute DMA line after the fetch cycle.  TED needs
+   three more single clocks to take the bus from the CPU: the attribute
+   slots in that time receive what the halted CPU keeps on the bus, the
+   operand of the instruction after the store.  Later slots receive the
+   attributes; earlier characters keep the previous request's data.  The
+   CPU is halted until the end of the DMA window.  */
+inline static void line_becomes_bad(int cycle, unsigned int line)
 {
-    if (cycle >= TED_FETCH_CYCLE
-        && cycle <= TED_FETCH_CYCLE + TED_SCREEN_TEXTCOLS + 3) {
-        int pos;            /* Value of line counter when this happens.  */
-        int inc;            /* Total increment for the line counter.  */
-        int num_chars;      /* Total number of characters to fetch.  */
-        int num_0xff_fetches; /* Number of 0xff fetches to do.  */
+    int garbage, fresh;
 
-        ted.bad_line = 1;
+    if (!ted.memory_fetch_done
+        || line < ted.first_dma_line || line >= ted.last_dma_line) {
+        /* Before the fetch cycle, the fetch alarm serves the request.  */
+        return;
+    }
 
-        /*if (cycle <= TED_FETCH_CYCLE + 2)
-            ted.raster.ycounter = 0;*/
+    ted.bad_line = 1;
+    ted.row_counter_active = 1;
 
-        ted.ycounter_reset_checked = 1;
+    /* The following line fetches the character data (see the raster draw
+       handler).  A character DMA on this line has kept the CPU halted.  */
+    if (ted.memory_fetch_done == 2 || cycle >= TED_DMA_END_CYCLE) {
+        return;
+    }
 
-        num_chars = (TED_SCREEN_TEXTCOLS - (cycle - (TED_FETCH_CYCLE + 3)));
+    garbage = (cycle + 4 - TED_DMA_SLOT_CYCLE + 1) / 2;
+    fresh = (cycle + 10 - TED_DMA_SLOT_CYCLE + 1) / 2;
+    if (garbage < 0) {
+        garbage = 0;
+    }
+    if (fresh > TED_SCREEN_TEXTCOLS) {
+        fresh = TED_SCREEN_TEXTCOLS;
+    }
+    if (garbage < fresh) {
+        memset(ted.cbuf_tmp + garbage,
+               mem_bank_peek(0, (uint16_t)(reg_pc + 1), NULL),
+               fresh - garbage);
+    }
+    if (fresh < TED_SCREEN_TEXTCOLS) {
+        ted_fetch_color(fresh, TED_SCREEN_TEXTCOLS - fresh);
+    }
 
-        /* Take over the bus until the memory fetch is done.  */
-        dma_maincpu_steal_cycles(maincpu_clk, num_chars, 0);
-        ted_delay_oldclk(num_chars);
-
-        if (num_chars <= TED_SCREEN_TEXTCOLS) {
-            /* Matrix fetches starts immediately, but the TED needs
-               at least 3 cycles to become the bus master.  Before
-               this happens, it fetches 0xff.  */
-            num_0xff_fetches = 3;
-
-            /* If we were in idle state before creating the bad
-               line, the counters have not been incremented.  */
-            if (ted.idle_state) {
-                pos = 0;
-                inc = num_chars;
-                if (inc < 0) {
-                    inc = 0;
-                }
-            } else {
-                pos = cycle - (TED_FETCH_CYCLE + 3);
-                if (pos > TED_SCREEN_TEXTCOLS - 1) {
-                    pos = TED_SCREEN_TEXTCOLS - 1;
-                }
-                inc = TED_SCREEN_TEXTCOLS;
-            }
-        } else {
-            pos = 0;
-            num_chars = inc = TED_SCREEN_TEXTCOLS;
-            num_0xff_fetches = cycle - TED_FETCH_CYCLE;
-        }
-        /* This is normally done at cycle `TED_FETCH_CYCLE + 2'.  */
-        /*ted.mem_counter = ted.memptr;*/
-        /*ted.memptr_col = ted.mem_counter;*/
-
-        /* Force the DMA.  */
-        /* Note that `ted.cbuf' is loaded from the value of
-           the next opcode as the VIC-II is not the bus master yet.  */
-        if (num_chars <= num_0xff_fetches) {
-            /*memset(ted.vbuf + pos, 0xff, num_chars);*/
-            memset(ted.cbuf_tmp + pos, mem_ram[reg_pc] & 0x7f,
-                   num_chars);
-        } else {
-            /*memset(ted.vbuf + pos, 0xff, num_0xff_fetches);*/
-            memcpy(ted.cbuf_tmp, ted.cbuf, pos);
-            memset(ted.cbuf_tmp + pos, mem_ram[reg_pc] & 0x7f,
-                   num_0xff_fetches);
-            /*ted_fetch_matrix(pos + num_0xff_fetches,
-                             num_chars - num_0xff_fetches);*/
-            ted_fetch_color(pos + num_0xff_fetches,
-                            num_chars - num_0xff_fetches);
-        }
-
-        /* Set the value by which `ted.mem_counter' is incremented on
-           this line.  */
-        ted.mem_counter_inc = TED_SCREEN_TEXTCOLS; /*inc;*/
-
-        /* Remember we have done a DMA.  */
-        ted.memory_fetch_done = 2;
-
-        /* As we are on a bad line, switch to display state.  */
-        ted.idle_state = 0;
-
-        /* Try to display things correctly.  This is not exact,
-           but should be OK for most cases (FIXME?).  */
-        if (inc == TED_SCREEN_TEXTCOLS) {
-            ted.raster.draw_idle_state = 0;
-            ted.idle_data_location = IDLE_NONE;
-        }
-    } else if (cycle <= TED_FETCH_CYCLE + TED_SCREEN_TEXTCOLS + 6) {
-        /* Bad line has been generated after fetch interval, but
-           before `ted.raster.ycounter' is incremented.  */
-
-        ted.bad_line = 1;
-
-        /* If in idle state, counter is not incremented.  */
-        if (ted.idle_state) {
-            ted.mem_counter_inc = 0;
-        }
-
-        /* We are not in idle state anymore.  */
-        /* This is not 100% correct, but should be OK for most cases.
-           (FIXME?)  */
-        ted.raster.draw_idle_state = ted.idle_state = 0;
-        ted.idle_data_location = IDLE_NONE;
-    } else {
-        /* Line is now bad, so we must switch to display state.
-           Anyway, we cannot do it here as the `ycounter' handling
-           must happen in as in idle state.  */
-        ted.force_display_state = 1;
+    /* The CPU's second access after the store, at cycle + 4, is the first
+       one halted; it reads at the end of the DMA window, like after a bad
+       line requested at the fetch cycle.  */
+    if (cycle + 4 < TED_DMA_END_CYCLE) {
+        dma_maincpu_steal_cycles(maincpu_clk,
+                                 (CLOCK)(TED_DMA_END_CYCLE - 4 - cycle), 0);
+        ted_delay_oldclk((CLOCK)(TED_DMA_END_CYCLE - 4 - cycle));
     }
 }
-#endif
 
 void ted_badline_check_state(uint8_t value, const int cycle,
                              const unsigned int line)
 {
     int was_bad_line, now_bad_line;
 
-    /* Check whether bad line state has changed.  */
-    /*was_bad_line = (ted.allow_bad_lines
-                    && (ted.raster.ysmooth == (int)(line & 7)));*/
-    was_bad_line = ted.bad_line;
+    /* Check whether this line requests attribute DMA before and after the
+       vertical scroll change.  */
+    was_bad_line = (ted.allow_bad_lines
+                    && (ted.raster.ysmooth == (int)(line & 7)));
     now_bad_line = (ted.allow_bad_lines
-                    && (((int)(value & 7) == (int)(line & 7))
-                        /*|| (ted.bad_line &&
-                         ((int)((value + 1) & 7) == (int)(line & 7) ))*/))
-    ;
+                    && ((int)(value & 7) == (int)(line & 7)));
 
     if (was_bad_line && !now_bad_line) {
         line_becomes_good(cycle);
-    } else {
-        /*if (!was_bad_line && now_bad_line)
-                        ted.raster_irq_clk++;*/
-        /*line_becomes_bad(cycle);*/
+    } else if (!was_bad_line && now_bad_line) {
+        line_becomes_bad(cycle, line);
     }
 }

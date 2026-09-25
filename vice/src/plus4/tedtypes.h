@@ -47,8 +47,10 @@
 
 #define TED_40COL_START_PIXEL ted.screen_leftborderwidth
 #define TED_40COL_STOP_PIXEL  (ted.screen_leftborderwidth + TED_SCREEN_XPIX)
-#define TED_38COL_START_PIXEL (ted.screen_leftborderwidth + 7)
-#define TED_38COL_STOP_PIXEL  (ted.screen_leftborderwidth + 311)
+/* The 38 column window starts and stops one double clock (eight pixels)
+   inside the 40 column window on both sides.  */
+#define TED_38COL_START_PIXEL (ted.screen_leftborderwidth + 8)
+#define TED_38COL_STOP_PIXEL  (ted.screen_leftborderwidth + 312)
 
 /* FIXME don't need */
 #define TED_PAL_OFFSET                  48
@@ -106,6 +108,31 @@ typedef enum ted_video_mode_s ted_video_mode_t;
 
 /* Cycle # at which the TED takes the bus in a bad line (BA goes low).  */
 #define TED_FETCH_CYCLE             4
+
+/* Cycle # at which the CPU runs again after the DMA of a bad line.  */
+#define TED_DMA_END_CYCLE           (TED_FETCH_CYCLE + (TED_SCREEN_TEXTCOLS + 3) * 2)
+
+/* Attribute and character bytes are fetched for character i at cycle
+   TED_DMA_SLOT_CYCLE + 2 * i.  */
+#define TED_DMA_SLOT_CYCLE          12
+
+/* Cycles at which the side border flip-flop tests CSEL ($ff07 bit 3).  Each
+   test only fires for its own width: the display starts at cycle 16 in 40
+   column mode or 18 in 38 column mode, and stops at cycle 94 in 38 column
+   mode or 96 in 40 column mode.  A CPU write is seen by later cycles.  */
+#define TED_40COL_START_CYCLE       16
+#define TED_38COL_START_CYCLE       18
+#define TED_38COL_STOP_CYCLE        94
+#define TED_40COL_STOP_CYCLE        96
+
+/* Cycle at which the incremented raster line is latched for the vertical
+   window tests.  */
+#define TED_LINE_LATCH_CYCLE        112
+
+/* The blink counter ($ff1f bits 3-6) is incremented once per frame on this
+   line, at dot 336 ("Increment Blink" in the data sheet).  */
+#define TED_BLINK_LINE              205
+#define TED_BLINK_CYCLE             100
 
 /* Delay for the raster line interrupt.  This is not due to the TED, since
    it triggers the IRQ line at the beginning of the line, but to the 7501

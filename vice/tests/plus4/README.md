@@ -293,3 +293,131 @@ individual clock slots for all 114 phases and 0–8 pending CPU cycles. It cover
 forced single clock and automatic clock with/without the display window,
 including line crossings and even-phase alignment. Run with
 `CFLAGS='-fsanitize=address,undefined -g'` for sanitizer checks.
+
+## Side and vertical border flip-flops
+
+```sh
+sh tests/plus4/run-border-timing-test.sh /path/to/configured/build
+python3 tests/plus4/run-border-timing-test.py /path/to/xplus4
+```
+
+The previous handlers were copied from the VIC-II and used its cycles (17 and
+56) and its first/last border lines. On TED, CSEL is tested at cycle 16 (40
+columns) or 18 (38 columns) to start the display and at cycle 94 (38 columns)
+or 96 (40 columns) to stop it, and each test only fires for its own width.
+A mid-line CSEL write therefore changes the right edge of the same line,
+switching 38 to 40 columns during cycles 16–17 leaves the line in the border,
+and switching 40 to 38 columns during cycles 94–95 keeps the border open.
+The 38 column window is eight pixels narrower on each side (the VIC-II value
+was seven and nine). The vertical window opens on line 4 (25 rows) or 8 (24
+rows) and closes on line 200 (24 rows) or 204 (25 rows); a RSEL/DEN change
+on one of these lines applies that line's test, using the line number that
+is incremented at cycle 112. Switching rows on lines 199 or 203 therefore no
+longer blanks those lines: 25 to 24 rows on line 203 opens the lower border.
+
+These cycles and lines follow the matching display-window and row-select
+logic of YapeSDL (`TED::ted_process`, cases 16/18/94/96, and `newLine`)
+and plus4emu (`TED7360::run` columns 0/2/78/80, `write_register_FF06`),
+authorized for this analysis, whose horizontal coordinates coincide with
+VICE's cycles (YapeSDL) or are offset by 16 (plus4emu). They are consistent
+with the preliminary data sheet's 40/38 column and 25/24 row geometry. They
+are not new measurements of original hardware.
+
+The unit test includes the production `ted-mem.c` handlers and checks every
+cycle of a line. The integration test measures display spans in screenshots
+after writes in the middle of lines 100, 199 and 203 (vertical scroll 0
+keeps them free of DMA); the previous build fails all three cases. In the open border
+VICE still draws the idle background colour; TED's idle graphics there are
+not modelled.
+
+## Blink counter line
+
+```sh
+sh tests/plus4/run-blink-test.sh /path/to/configured/build
+python3 tests/plus4/run-blink-test.py /path/to/xplus4
+```
+
+The blink counter in `$ff1f` bits 3–6 (and the flash/cursor state toggled when
+it wraps) advanced at VICE's vertical sync, with a FIXME. The data sheet's
+horizontal decodes list "Increment Blink" at dot 336 (cycle 100); YapeSDL
+(`newLine`, line 205) and plus4emu (`TED7360::run`, column 87 of line 205)
+both qualify it with line 205. The counter now advances when line 205 ends;
+`$ff1f` reads and writes from cycle 100 of that line account for the pending
+increment. Because it follows the line and not vertical sync, raster-counter
+writes that skip or repeat line 205 change its rate, as on those emulators.
+The line qualifier is their choice, not a statement of the data sheet.
+
+The integration test reads `$ff1f` on lines 204 and 206 and on line 204 of the
+following frame; the previous build advanced between line 206 and the next
+frame. The unit test covers reads and writes around cycle 100 and a write of
+15 after the counter wrapped.
+
+## Mid-line horizontal scroll
+
+```sh
+python3 tests/plus4/run-hscroll-test.py /path/to/xplus4
+```
+
+A `$ff07` scroll write after the second character was deferred to the next
+line. Both YapeSDL (`writeHorizShift`, aligned to the next single clock) and
+plus4emu (`setHorizontalScroll` as a delayed event used by the per-cycle
+renderers) apply it within the line. The change is now queued on VICE's
+character-granular foreground list from the character after the one being
+output (character i is output during cycles 16 + 2i and 17 + 2i), so later
+characters move: a larger scroll leaves background colour in the gap, as
+YapeSDL's `drawEmptyArea` does, and a smaller one overlaps the previous
+character. The pixel within a character at which TED reloads its shift
+register is not modelled, so the split is exact only to a character.
+
+The test alternates reverse spaces and spaces and writes a scroll of four in
+the middle of line 100 (vertical scroll 0 keeps it free of DMA). Line 99 must
+be unscrolled, line 101 scrolled, and line 100 unscrolled on the left and
+scrolled on the right. The previous build scrolled only from line 101.
+
+## Attribute DMA requested in the middle of a line
+
+```sh
+python3 tests/plus4/run-late-dma-test.py /path/to/xplus4
+```
+
+A `$ff06` vertical-scroll write that makes the current line an attribute DMA
+line after the fetch cycle was ignored (the handling copied from the VIC-II
+was disabled). Both YapeSDL (`TED::Write`, `$ff06`, "Delayed DMA") and
+plus4emu (`processDelayedEvents`, vertical scroll write and DMA cycles 1–5)
+start the DMA within the line: characters already passed keep the previous
+request's attributes, three slots receive what the halted CPU keeps on the
+bus, and the remaining slots receive the attributes, while the CPU is halted
+to the end of the DMA window. The late request now does the same. With the
+attribute slot for character i at cycle 12 + 2i (plus4emu column 110 + 2i),
+the slots at the store cycle + 4, + 6 and + 8 receive the operand of the
+instruction after the store (YapeSDL reads `PC + 1`), and the CPU is halted
+until cycle 90, where it resumes after an ordinary bad line. The following
+line fetches the characters, as for a request at the fetch cycle. The pixel
+phase of the DMA relative to the store follows plus4emu's delayed events and
+is not a new measurement of original hardware.
+
+The test changes the attribute base between the ordinary fetch of a row and
+a write of vertical scroll 4 in the middle of line 100, followed by
+`LDA #$55`. The next row must show the old attributes, three cells of `$55`
+and the new attributes, and the second `$ff1e` read must come after cycle 90.
+The previous build fetched nothing and did not halt the CPU. Pets Rescue's
+register table routine writes `$ff06` without raster synchronisation and now
+triggers such requests during its intro, shifting its later animation phase.
+
+## Idle fetch data
+
+```sh
+python3 tests/plus4/run-idle-test.py /path/to/xplus4
+```
+
+In idle cycles TED reads `$ffff`. VICE used RAM at `$ffff` (the VIC-II's
+`$3fff`/`$39ff` distinction had been reduced to it). Both plus4emu
+(`idleMemoryRead` through `tedDMAReadMap`, which follows `$ff3e`/`$ff3f`)
+and YapeSDL (`Read(0xFFFF)` in the idle branches of its renderers) read it
+through the ROM/RAM selection, normally the last byte of the Kernal ROM
+(`$fc` in 318004-05, the high byte of the IRQ vector). Idle fetches now use
+the selection of the DMA fetches (`$ff13` bit 0). The test opens the lower
+border and stores `$81` in RAM at `$ffff`: with ROM selected the idle line
+must show `$fc`, with RAM selected (`$ff3f`) `$81`. DRAM refresh addresses
+read during the refresh cycles, and the CPU bus seen by YapeSDL in double
+clock mode, are not modelled.
