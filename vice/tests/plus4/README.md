@@ -141,10 +141,18 @@ individual-dot phase of the vertical counter.
 The CPU may finish consecutive writes during the three single clocks of BA
 warning. The CPU core issues both RMW writes separately; treating the first
 as a read incorrectly stalls `INC $ff14` between the old and new value.
-Both TED register and 16/32/64 KiB video-RAM write paths preserve this interval;
-reads still service the DMA immediately. The tests compile the production
-register, fetch and clock handlers, substituting only DMA/alarm sinks and
-unused drawing functions.
+Only writes continue, though: the read in the single clock in which BA falls
+completes, and RDY stops the 7501 at its next read (YapeSDL admits only
+write cycles from the next single clock, plus4emu runs the CPU with RDY
+low). An earlier version let any access before a write pass during the whole
+warning, so a store whose last read followed BA completed during the DMA:
+Return to Promised Land's `STA $ff07` after a forced bad line landed at
+cycle 11 instead of 95, and that line showed a row of dots. TED now records
+where each CPU write ends; a write whose previous access ended there follows
+a write, any other follows a read. Both TED register and 16/32/64 KiB
+video-RAM write paths use `ted_dma_halts_cpu()`. The tests compile the
+production register, fetch and clock handlers, substituting only DMA/alarm
+sinks and unused drawing functions.
 
 These two faults corrupted Lykia 1.4's title-screen colour changes. A fresh
 PAL/1541 boot from the user's disk reaches the coherent title and menu with

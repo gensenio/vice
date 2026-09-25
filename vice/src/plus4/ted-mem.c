@@ -80,6 +80,10 @@ static int unused_bits_in_registers[64] =
 inline static void ted_local_store_vbank(uint16_t addr, uint8_t value)
 {
     unsigned int f;
+    /* The access before this write, before the single clock stretch.
+       WARNING: Assumes `maincpu_rmw_flag' is 0 or 1.  */
+    CLOCK prev_clk = maincpu_clk - maincpu_rmw_flag - 1;
+    int after_write = (prev_clk == ted.cpu_write_end_clk);
 
     ted_delay_clk();
 
@@ -95,11 +99,9 @@ inline static void ted_local_store_vbank(uint16_t addr, uint8_t value)
             f = 1;
         }
 
-        if (mclk >= ted.fetch_clk && mclk - ted.fetch_clk >= TED_DMA_BUS_DELAY) {
+        if (ted_dma_halts_cpu(prev_clk, after_write)) {
             ted_fetch_alarm_handler(maincpu_clk - ted.fetch_clk, NULL);
             f = 1;
-            /* WARNING: Assumes `maincpu_rmw_flag' is 0 or 1.  */
-            mclk = maincpu_clk - maincpu_rmw_flag - 1;
         }
 
         ted_delay_clk();
@@ -107,11 +109,16 @@ inline static void ted_local_store_vbank(uint16_t addr, uint8_t value)
 
     ted_fetch_store(addr, mem_ram[addr], 0xffff);
     mem_ram[addr] = value;
+    ted.cpu_write_end_clk = maincpu_clk;
 }
 
 inline static void ted_local_store_vbank_32k(uint16_t addr, uint8_t value)
 {
     unsigned int f;
+    /* The access before this write, before the single clock stretch.
+       WARNING: Assumes `maincpu_rmw_flag' is 0 or 1.  */
+    CLOCK prev_clk = maincpu_clk - maincpu_rmw_flag - 1;
+    int after_write = (prev_clk == ted.cpu_write_end_clk);
 
     ted_delay_clk();
 
@@ -127,11 +134,9 @@ inline static void ted_local_store_vbank_32k(uint16_t addr, uint8_t value)
             f = 1;
         }
 
-        if (mclk >= ted.fetch_clk && mclk - ted.fetch_clk >= TED_DMA_BUS_DELAY) {
+        if (ted_dma_halts_cpu(prev_clk, after_write)) {
             ted_fetch_alarm_handler(maincpu_clk - ted.fetch_clk, NULL);
             f = 1;
-            /* WARNING: Assumes `maincpu_rmw_flag' is 0 or 1.  */
-            mclk = maincpu_clk - maincpu_rmw_flag - 1;
         }
 
         ted_delay_clk();
@@ -139,11 +144,16 @@ inline static void ted_local_store_vbank_32k(uint16_t addr, uint8_t value)
 
     ted_fetch_store(addr & 0x7fff, mem_ram[addr & 0x7fff], 0x7fff);
     mem_ram[addr & 0x7fff] = value;
+    ted.cpu_write_end_clk = maincpu_clk;
 }
 
 inline static void ted_local_store_vbank_16k(uint16_t addr, uint8_t value)
 {
     unsigned int f;
+    /* The access before this write, before the single clock stretch.
+       WARNING: Assumes `maincpu_rmw_flag' is 0 or 1.  */
+    CLOCK prev_clk = maincpu_clk - maincpu_rmw_flag - 1;
+    int after_write = (prev_clk == ted.cpu_write_end_clk);
 
     ted_delay_clk();
 
@@ -159,11 +169,9 @@ inline static void ted_local_store_vbank_16k(uint16_t addr, uint8_t value)
             f = 1;
         }
 
-        if (mclk >= ted.fetch_clk && mclk - ted.fetch_clk >= TED_DMA_BUS_DELAY) {
+        if (ted_dma_halts_cpu(prev_clk, after_write)) {
             ted_fetch_alarm_handler(maincpu_clk - ted.fetch_clk, NULL);
             f = 1;
-            /* WARNING: Assumes `maincpu_rmw_flag' is 0 or 1.  */
-            mclk = maincpu_clk - maincpu_rmw_flag - 1;
         }
 
         ted_delay_clk();
@@ -171,6 +179,7 @@ inline static void ted_local_store_vbank_16k(uint16_t addr, uint8_t value)
 
     ted_fetch_store(addr & 0x3fff, mem_ram[addr & 0x3fff], 0x3fff);
     mem_ram[addr & 0x3fff] = value;
+    ted.cpu_write_end_clk = maincpu_clk;
 }
 
 /* Encapsulate inlined function for other modules */

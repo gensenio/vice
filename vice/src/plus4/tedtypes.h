@@ -360,6 +360,11 @@ struct ted_s {
     /* Clock cycle for the next "raster fetch" alarm.  */
     CLOCK fetch_clk;
 
+    /* Clock at which the last CPU write seen by TED ended.  A write whose
+       previous access ended here follows another write (RMW, stack
+       pushes), not a read.  */
+    CLOCK cpu_write_end_clk;
+
     /* Clock cycle for the next "raster draw" alarm.  */
     CLOCK draw_clk;
 
@@ -422,6 +427,7 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data);
 void ted_delay_clk(void);
 void ted_delay_oldclk(CLOCK num);
 void ted_delay_resync(void);
+int ted_dma_halts_cpu(CLOCK clk, int after_write);
 CLOCK ted_delay_irq_clk(CLOCK clk);
 
 /* Debugging options.  */

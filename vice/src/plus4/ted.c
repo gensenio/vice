@@ -90,10 +90,26 @@ void ted_change_timing(machine_timing_t *machine_timing, int bordermode)
     ted_color_update_palette(ted.raster.canvas);
 }
 
+/* Return non-zero if TED's DMA request halts the CPU before its access at
+   `clk', which precedes a write.  BA goes low at `fetch_clk'; the read in
+   the single clock in which it falls still completes, and RDY stops the
+   7501 at its next read, which waits for the end of the DMA.  During the
+   three single clocks of BA warning (`TED_DMA_BUS_DELAY'), before TED owns
+   the bus, only writes continue: a write that follows another write (the
+   two RMW writes, stack pushes) completes.  */
+int ted_dma_halts_cpu(CLOCK clk, int after_write)
+{
+    if (clk < ted.fetch_clk || clk - ted.fetch_clk < 2) {
+        return 0;
+    }
+    return !after_write || clk - ted.fetch_clk >= TED_DMA_BUS_DELAY;
+}
+
 inline void ted_handle_pending_alarms(CLOCK num_write_cycles)
 {
     if (num_write_cycles != 0) {
         int f;
+        int after_write;
 
         /* Cycles can be stolen only during the read accesses, so we serve
            only the events that happened during them.  The last read access
@@ -103,8 +119,11 @@ inline void ted_handle_pending_alarms(CLOCK num_write_cycles)
            correctly anyway, so we don't care about them...  */
 
         /* Go back to the time when the read accesses happened and serve TED
-           events.  */
+           events.  The CPU core calls us for each write, also for the two
+           RMW writes: the access before the second one is the first
+           write, not a read.  */
         maincpu_clk -= num_write_cycles;
+        after_write = (maincpu_clk == ted.cpu_write_end_clk);
         ted_delay_clk();
 
         do {
@@ -113,11 +132,7 @@ inline void ted_handle_pending_alarms(CLOCK num_write_cycles)
                 ted_raster_draw_alarm_handler(maincpu_clk - ted.draw_clk, NULL);
                 f = 1;
             }
-            /* RDY stops reads, not writes.  The CPU core now calls us for
-               both RMW writes; do not mistake the first write for a read
-               and halt between them during TED's BA warning interval. */
-            if (maincpu_clk >= ted.fetch_clk
-                && maincpu_clk - ted.fetch_clk >= TED_DMA_BUS_DELAY) {
+            if (ted_dma_halts_cpu(maincpu_clk, after_write)) {
                 ted_fetch_alarm_handler(0, NULL);
                 f = 1;
             }
@@ -144,6 +159,7 @@ inline void ted_handle_pending_alarms(CLOCK num_write_cycles)
             maincpu_clk += num_write_cycles;
             ted_delay_clk();
         }
+        ted.cpu_write_end_clk = maincpu_clk;
     } else {
         int f;
 
