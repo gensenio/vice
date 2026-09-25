@@ -29,6 +29,7 @@ int main(void)
     ted.first_dma_line = 0;
     ted.last_dma_line = 203;
     ted.ted_raster_counter = 102;
+    ted.dma_line = 102;
     ted.memptr_col = 1020;
     ted.raster.ysmooth = 0; /* no longer matches the preceding line */
     ted.matrix_fetch_pending = 1;

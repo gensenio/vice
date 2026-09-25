@@ -124,6 +124,40 @@ flags, address values, interval length and overflow, plus all FF1E writes in
 both phases. This guards the batching optimization without changing the
 hardware assumptions above or adding serialized state.
 
+## Raster writes and DMA bus warning
+
+```sh
+sh tests/plus4/run-dma-line-test.sh /path/to/configured/build
+CFLAGS='-g -fsanitize=address,undefined' sh tests/plus4/run-dma-line-test.sh /path/to/configured/build
+```
+
+The DMA comparison uses a scanline latch, separate from the writable
+`$ff1c/$ff1d` counter. A raster write must neither cancel this line's pending
+fetch (including an overdue event during CPU writes) nor change its
+attribute/character selection or the following DMA request. The latch is
+advanced at VICE's existing end-of-line event; this does not resolve the
+individual-dot phase of the vertical counter.
+
+The CPU may finish consecutive writes during the three single clocks of BA
+warning. The CPU core issues both RMW writes separately; treating the first
+as a read incorrectly stalls `INC $ff14` between the old and new value.
+Both TED register and 16/32/64 KiB video-RAM write paths preserve this interval;
+reads still service the DMA immediately. The tests compile the production
+register, fetch and clock handlers, substituting only DMA/alarm sinks and
+unused drawing functions.
+
+These two faults corrupted Lykia 1.4's title-screen colour changes. A fresh
+PAL/1541 boot from the user's disk reaches the coherent title and menu with
+the correction, without a game-specific workaround. The latch separation is
+corroborated by YapeSDL's `ff1d_latch`, plus4emu's `savedVideoLineDelay1`, and
+FPGATED's `videoline`. The three-clock bus warning is specified in the
+Commodore preliminary data sheet, Bus Interface section (printed page 22).
+Reference-emulator traces are diagnostic evidence, not original-chip captures.
+
+TED snapshot version 1.11 saves the DMA scanline and bitmap-position latch.
+Older snapshots approximate them from the live raster and row counters;
+they cannot recover a latch that differed after a register write.
+
 ## Masked raster compare events
 
 ```sh
@@ -339,17 +373,20 @@ python3 tests/plus4/run-blink-test.py /path/to/xplus4
 
 The blink counter in `$ff1f` bits 3–6 (and the flash/cursor state toggled when
 it wraps) advanced at VICE's vertical sync, with a FIXME. The data sheet's
-horizontal decodes list "Increment Blink" at dot 336 (cycle 100); YapeSDL
-(`newLine`, line 205) and plus4emu (`TED7360::run`, column 87 of line 205)
-both qualify it with line 205. The counter now advances when line 205 ends;
-`$ff1f` reads and writes from cycle 100 of that line account for the pending
-increment. Because it follows the line and not vertical sync, raster-counter
-writes that skip or repeat line 205 change its rate, as on those emulators.
-The line qualifier is their choice, not a statement of the data sheet.
+horizontal decodes list "Increment Blink" at dot 336; YapeSDL (`newLine`,
+line 205), plus4emu (`TED7360::run`, column 87 of line 205, cycle 103) and
+FPGATED (`FlashCount`, `videoline == 205`, counter 352, cycle 104) qualify it
+with line 205. FPGATED's counter is 0 at the start of the 40 column window
+(cycle 16); its events for this and the display window come later than the
+sheet's dots, and its author reports that events take effect one or two
+single clocks after the listed count. The counter now advances when line 205
+ends; `$ff1f` reads and writes from cycle 104 of that line account for the
+pending increment. Because it follows the line and not vertical sync,
+raster-counter writes that skip or repeat line 205 change its rate.
 
 The integration test reads `$ff1f` on lines 204 and 206 and on line 204 of the
 following frame; the previous build advanced between line 206 and the next
-frame. The unit test covers reads and writes around cycle 100 and a write of
+frame. The unit test covers reads and writes around cycle 104 and a write of
 15 after the counter wrapped.
 
 ## Mid-line horizontal scroll
