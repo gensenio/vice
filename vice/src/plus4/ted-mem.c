@@ -43,6 +43,7 @@
 #include "plus4pio2.h"
 #include "raster-changes.h"
 #include "ted-badline.h"
+#include "ted-counter.h"
 #include "ted-fetch.h"
 #include "ted-irq.h"
 #include "ted-mem.h"
@@ -109,6 +110,7 @@ inline static void ted_local_store_vbank(uint16_t addr, uint8_t value)
         ted_delay_clk();
     } while (f);
 
+    ted_fetch_store(addr, mem_ram[addr], 0xffff);
     mem_ram[addr] = value;
 }
 
@@ -145,6 +147,7 @@ inline static void ted_local_store_vbank_32k(uint16_t addr, uint8_t value)
         ted_delay_clk();
     } while (f);
 
+    ted_fetch_store(addr & 0x7fff, mem_ram[addr & 0x7fff], 0x7fff);
     mem_ram[addr & 0x7fff] = value;
 }
 
@@ -181,6 +184,7 @@ inline static void ted_local_store_vbank_16k(uint16_t addr, uint8_t value)
         ted_delay_clk();
     } while (f);
 
+    ted_fetch_store(addr & 0x3fff, mem_ram[addr & 0x3fff], 0x3fff);
     mem_ram[addr & 0x3fff] = value;
 }
 
@@ -291,7 +295,11 @@ inline static void ted06_store(const uint8_t value)
 
     if ((line == ted.first_dma_line) && (value & 0x10) != 0) {
         ted.allow_bad_lines = 1;
+        /* DEN can enable the display after the start-of-frame check.  The
+           CPU clock must follow the display enable latch on this line too. */
+        ted.character_fetch_on = 1;
         ted.raster.ycounter = 0;         /* should be 7 actually */
+        ted.draw_ycounter = 0;
     }
 
     if ((ted.raster.ysmooth != (value & 7))
@@ -688,13 +696,15 @@ inline static void ted1a1b_store(uint16_t addr, uint8_t value)
 {
     unsigned int new_counter;
 
+    /* Registers 26/27 hold the character-position reload, not the
+       matrix DMA counter (TED data sheet, register descriptions). */
     ted.regs[addr] = value;
     if (addr == 0x1a) {
-        new_counter = ((value & 3) << 8) + (ted.mem_counter & 0xff);
+        new_counter = ((value & 3) << 8) + (ted.chr_pos_reload & 0xff);
     } else {
-        new_counter = (ted.mem_counter & 0x300) | value;
+        new_counter = (ted.chr_pos_reload & 0x300) | value;
     }
-    ted.mem_counter = new_counter;
+    ted.chr_pos_reload = new_counter;
 }
 
 inline static void ted1c1d_store(uint16_t addr, uint8_t value)
@@ -767,8 +777,7 @@ inline static void ted1c1d_store(uint16_t addr, uint8_t value)
 
 inline static void ted1e_store(uint8_t value)
 {
-    /* FIXME */
-    /* int new_hcount = (~value & 0xfc) >> 1; */
+    ted_counter_store(value);
 }
 
 inline static void ted1f_store(uint8_t value)
@@ -784,6 +793,11 @@ inline static void ted1f_store(uint8_t value)
     }
     ted.cursor_phase = current_cursor_phase | new_cursor_count;
     ted.cursor_visible = ted.cursor_phase & 0x10;
+    /* Keep the CPU-visible counter current without changing pixels that
+       have already passed through the video shift register. */
+    raster_changes_foreground_add_int(&ted.raster,
+                                     TED_RASTER_CHAR(TED_RASTER_CYCLE(maincpu_clk)),
+                                     &ted.draw_ycounter, value & 7);
     ted.raster.ycounter = value & 7;
 }
 
@@ -976,9 +990,9 @@ inline static uint8_t ted12_read(void)
 inline static uint8_t ted1a1b_read(uint16_t addr)
 {
     if (addr == 0x1a) {
-        return ((ted.mem_counter & 0x300) >> 8) | 0xfc;
+        return ((ted.chr_pos_reload & 0x300) >> 8) | 0xfc;
     } else {
-        return ted.mem_counter & 0xff;
+        return ted.chr_pos_reload & 0xff;
     }
 }
 
@@ -995,17 +1009,7 @@ inline static uint8_t ted1c1d_read(uint16_t addr)
 
 inline static uint8_t ted1e_read(void)
 {
-    int xpos;
-
-    xpos = ((int)TED_RASTER_CYCLE(maincpu_clk) - 16) * 4;
-    if (xpos < 0) {
-        xpos = ted.cycles_per_line * 4 + xpos;
-    }
-
-    xpos = (xpos / 2) & 0xfe;
-
-
-    return (uint8_t)xpos;
+    return (uint8_t)ted_counter_read();
 }
 
 inline static uint8_t ted1f_read(void)

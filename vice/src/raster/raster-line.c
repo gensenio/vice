@@ -244,49 +244,25 @@ inline static void fill_background(raster_t *raster)
     }
 
     if (raster->open_right_border || raster->border_disable) {
-        if (!raster->can_disable_border) {
+        int len = raster->geometry->screen_size.width
+                  - raster->geometry->gfx_position.x
+                  - raster->geometry->gfx_size.width
+                  - raster->xsmooth;
+        if (len > 0) {
             if (raster->draw_idle_state) {
                 memset(raster->draw_buffer_ptr +
                        raster->geometry->gfx_position.x
                        + raster->geometry->gfx_size.width
                        + raster->xsmooth,
                        raster->idle_background_color,
-                       raster->geometry->screen_size.width
-                       - raster->geometry->gfx_position.x
-                       - raster->geometry->gfx_size.width
-                       - raster->xsmooth);
+                       len);
             } else {
                 memset(raster->draw_buffer_ptr +
                        raster->geometry->gfx_position.x
                        + raster->geometry->gfx_size.width
                        + raster->xsmooth,
                        raster->xsmooth_color,
-                       raster->geometry->screen_size.width
-                       - raster->geometry->gfx_position.x
-                       - raster->geometry->gfx_size.width
-                       - raster->xsmooth);
-            }
-        } else {
-            int len = raster->geometry->screen_size.width
-                      - raster->geometry->gfx_position.x
-                      - raster->geometry->gfx_size.width
-                      - raster->xsmooth;
-            if (len > 0) {
-                if (raster->draw_idle_state) {
-                    memset(raster->draw_buffer_ptr +
-                           raster->geometry->gfx_position.x
-                           + raster->geometry->gfx_size.width
-                           + raster->xsmooth,
-                           raster->idle_background_color,
-                           len);
-                } else {
-                    memset(raster->draw_buffer_ptr +
-                           raster->geometry->gfx_position.x
-                           + raster->geometry->gfx_size.width
-                           + raster->xsmooth,
-                           raster->xsmooth_color,
-                           len);
-                }
+                       len);
             }
         }
     }

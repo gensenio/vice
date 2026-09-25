@@ -69,10 +69,10 @@ void ted_irq_raster_clear(CLOCK mclk)
     ted_irq_set_line_clk(mclk);
 }
 
-void ted_irq_timer1_set(void)
+void ted_irq_timer1_set(CLOCK mclk)
 {
     ted.irq_status |= 0x08;
-    ted_irq_set_line();
+    ted_irq_set_line_clk(mclk);
 }
 
 void ted_irq_timer1_clear(void)
@@ -81,10 +81,10 @@ void ted_irq_timer1_clear(void)
     ted_irq_set_line();
 }
 
-void ted_irq_timer2_set(void)
+void ted_irq_timer2_set(CLOCK mclk)
 {
     ted.irq_status |= 0x10;
-    ted_irq_set_line();
+    ted_irq_set_line_clk(mclk);
 }
 
 void ted_irq_timer2_clear(void)
@@ -93,10 +93,10 @@ void ted_irq_timer2_clear(void)
     ted_irq_set_line();
 }
 
-void ted_irq_timer3_set(void)
+void ted_irq_timer3_set(CLOCK mclk)
 {
     ted.irq_status |= 0x40;
-    ted_irq_set_line();
+    ted_irq_set_line_clk(mclk);
 }
 
 void ted_irq_timer3_clear(void)
@@ -165,6 +165,7 @@ void ted_irq_check_state(uint8_t value, unsigned int high)
 {
     unsigned int irq_line, line, user_irq_line;
     unsigned int old_raster_irq_line;
+    int trigger_irq;
 
     user_irq_line = ted.raster_irq_line;
 
@@ -183,55 +184,52 @@ void ted_irq_check_state(uint8_t value, unsigned int high)
     old_raster_irq_line = ted.raster_irq_line;
     ted_irq_set_raster_line(irq_line);
 
-    if (ted.regs[0x0a] & 0x2) {
-        int trigger_irq;
+    /* The mask controls the IRQ output, not the raster event flag. */
+    trigger_irq = 0;
 
-        trigger_irq = 0;
+    if (maincpu_rmw_flag) {
+        if (high) {
+            if ((TED_RASTER_CYCLE(maincpu_clk) == 0) && ((line & 0xff) == 0)) {
+                unsigned int previous_line = TED_PREVIOUS_LINE(line);
 
-        if (maincpu_rmw_flag) {
-            if (high) {
-                if ((TED_RASTER_CYCLE(maincpu_clk) == 0) && ((line & 0xff) == 0)) {
-                    unsigned int previous_line = TED_PREVIOUS_LINE(line);
-
-                    if ((previous_line != old_raster_irq_line) &&
-                        ((previous_line & 0xff) == (old_raster_irq_line & 0xff))) {
-                        /* MSB changed */
-                        trigger_irq = 1;
-                    }
-                } else {
-                    if ((line != old_raster_irq_line) &&
-                        ((line & 0xff) == (old_raster_irq_line & 0xff))) {
-                        /* MSB changed */
-                        trigger_irq = 1;
-                    }
+                if ((previous_line != old_raster_irq_line) &&
+                    ((previous_line & 0xff) == (old_raster_irq_line & 0xff))) {
+                    /* MSB changed */
+                    trigger_irq = 1;
                 }
             } else {
-                if (TED_RASTER_CYCLE(maincpu_clk) == 0) {
-                    unsigned int previous_line = TED_PREVIOUS_LINE(line);
+                if ((line != old_raster_irq_line) &&
+                    ((line & 0xff) == (old_raster_irq_line & 0xff))) {
+                    /* MSB changed */
+                    trigger_irq = 1;
+                }
+            }
+        } else {
+            if (TED_RASTER_CYCLE(maincpu_clk) == 0) {
+                unsigned int previous_line = TED_PREVIOUS_LINE(line);
 
-                    if ((previous_line != old_raster_irq_line) &&
-                        ((previous_line & 0x100) == (old_raster_irq_line & 0x100))) {
-                        /* bit0-7 changed */
-                        trigger_irq = 1;
-                    }
-                } else {
-                    if ((line != old_raster_irq_line) &&
-                        ((line & 0x100) == (old_raster_irq_line & 0x100))) {
-                        /* bit0-7 changed */
-                        trigger_irq = 1;
-                    }
+                if ((previous_line != old_raster_irq_line) &&
+                    ((previous_line & 0x100) == (old_raster_irq_line & 0x100))) {
+                    /* bit0-7 changed */
+                    trigger_irq = 1;
+                }
+            } else {
+                if ((line != old_raster_irq_line) &&
+                    ((line & 0x100) == (old_raster_irq_line & 0x100))) {
+                    /* bit0-7 changed */
+                    trigger_irq = 1;
                 }
             }
         }
+    }
 
-        if ((ted.raster_irq_line == line) &&
-            (line != old_raster_irq_line)) {
-            trigger_irq = 1;
-        }
+    if ((ted.raster_irq_line == line) &&
+        (line != old_raster_irq_line)) {
+        trigger_irq = 1;
+    }
 
-        if (trigger_irq) {
-            ted_irq_raster_set(maincpu_clk);
-        }
+    if (trigger_irq) {
+        ted_irq_raster_set(maincpu_clk);
     }
 }
 

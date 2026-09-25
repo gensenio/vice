@@ -28,6 +28,7 @@
 #include "vice.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include "alarm.h"
 #include "interrupt.h"
@@ -39,6 +40,7 @@
 #include "raster-sprite.h"
 #include "ted-irq.h"
 #include "ted-snapshot.h"
+#include "ted-sound.h"
 #include "ted.h"
 #include "tedtypes.h"
 #include "types.h"
@@ -70,7 +72,6 @@ void ted_snapshot_prepare(void)
 
     FIXME: this snapshot module is severely broken:
     - video stuff is incomplete/buggy
-    - sound stuff is completely missing
     - timer are completely missing
 
     NOTE: if you run into problems when testing, try running with a clean config and sound disabled
@@ -104,7 +105,7 @@ void ted_snapshot_prepare(void)
 
 static char snap_module_name[] = "TED";
 #define SNAP_MAJOR 1
-#define SNAP_MINOR 5
+#define SNAP_MINOR 10
 
 int ted_snapshot_write_module(snapshot_t *s)
 {
@@ -175,6 +176,37 @@ int ted_snapshot_write_module(snapshot_t *s)
     }
 
     if (raster_snapshot_write(m, &ted.raster)) {
+        goto fail;
+    }
+
+    /* Added in version 1.6: the reload and current bitmap position can
+       differ following a write to $ff1a/$ff1b. */
+    if (SMW_W(m, (uint16_t)ted.chr_pos_reload) < 0
+        || SMW_W(m, (uint16_t)ted.chr_pos_count) < 0) {
+        goto fail;
+    }
+
+    /* Version 1.7: preserve pending counter events across a snapshot. */
+    if (SMW_CLOCK(m, ted.counter_clk) < 0
+        || SMW_CLOCK(m, ted.counter_overflow_until) < 0
+        || SMW_B(m, (uint8_t)ted.counter_increment) < 0
+        || SMW_B(m, (uint8_t)ted.row_counter_active) < 0
+        || SMW_W(m, (uint16_t)ted.memptr_col) < 0) {
+        goto fail;
+    }
+
+    if (ted_sound_snapshot_write(m) < 0) {
+        goto fail;
+    }
+
+    if (SMW_BA(m, ted.bitmap_latched, TED_SCREEN_TEXTCOLS) < 0
+        || SMW_BA(m, ted.bitmap_data, TED_SCREEN_TEXTCOLS) < 0) {
+        goto fail;
+    }
+
+    if (SMW_B(m, (uint8_t)ted.draw_ycounter) < 0
+        || SMW_B(m, (uint8_t)ted.raster.ycounter) < 0
+        || SMW_B(m, (uint8_t)ted.matrix_fetch_pending) < 0) {
         goto fail;
     }
 
@@ -355,9 +387,71 @@ int ted_snapshot_read_module(snapshot_t *s)
         goto fail;
     }
 
+    if (snapshot_version_is_bigger(major_version, minor_version, 1, 5)) {
+        if (SMR_W_INT(m, &ted.chr_pos_reload) < 0
+            || SMR_W_INT(m, &ted.chr_pos_count) < 0) {
+            goto fail;
+        }
+    } else {
+        ted.chr_pos_reload = ted.memptr;
+        ted.chr_pos_count = ted.memptr;
+    }
+
+    if (snapshot_version_is_bigger(major_version, minor_version, 1, 6)) {
+        if (SMR_CLOCK(m, &ted.counter_clk) < 0
+            || SMR_CLOCK(m, &ted.counter_overflow_until) < 0
+            || SMR_B_INT(m, &ted.counter_increment) < 0
+            || SMR_B_INT(m, &ted.row_counter_active) < 0
+            || SMR_W_INT(m, &ted.memptr_col) < 0) {
+            goto fail;
+        }
+    } else {
+        /* Older modules contain neither pending events nor a DMA reload. */
+        ted.counter_clk = maincpu_clk;
+        ted.counter_overflow_until = 0;
+        ted.counter_increment = ted.character_fetch_on
+                               && RasterCycle >= 8 && RasterCycle < 89;
+        ted.row_counter_active = !ted.idle_state;
+        ted.memptr_col = ted.mem_counter;
+    }
+    if (snapshot_version_is_bigger(major_version, minor_version, 1, 7)) {
+        if (ted_sound_snapshot_read(m) < 0) {
+            goto fail;
+        }
+    } else {
+        ted_sound_snapshot_legacy(ted.regs + 0x0e);
+    }
+    ted.bitmap_dirty = 0;
+    memset(ted.bitmap_latched, 0, sizeof(ted.bitmap_latched));
+    if (snapshot_version_is_bigger(major_version, minor_version, 1, 8)) {
+        if (SMR_BA(m, ted.bitmap_latched, TED_SCREEN_TEXTCOLS) < 0
+            || SMR_BA(m, ted.bitmap_data, TED_SCREEN_TEXTCOLS) < 0) {
+            goto fail;
+        }
+        for (i = 0; i < TED_SCREEN_TEXTCOLS; i++) {
+            if (ted.bitmap_latched[i] > 1) {
+                goto fail;
+            }
+            ted.bitmap_dirty |= ted.bitmap_latched[i];
+        }
+    }
+    ted.draw_ycounter = ted.raster.ycounter;
+    ted.matrix_fetch_pending = ted.allow_bad_lines
+        && ((ted.ted_raster_counter - 1) & 7) == (unsigned int)ted.raster.ysmooth;
+    if (snapshot_version_is_bigger(major_version, minor_version, 1, 9)) {
+        if (SMR_B_INT(m, &ted.draw_ycounter) < 0
+            || SMR_B_INT(m, &ted.raster.ycounter) < 0
+            || SMR_B_INT(m, &ted.matrix_fetch_pending) < 0
+            || ted.draw_ycounter > 7 || ted.raster.ycounter > 7
+            || ted.matrix_fetch_pending > 1) {
+            goto fail;
+        }
+    }
+    ted_delay_resync();
+
     raster_force_repaint(&ted.raster);
     DBG(("TED: snapshot loaded."));
-    return 0;
+    return snapshot_module_close(m);
 
 fail:
     if (m != NULL) {

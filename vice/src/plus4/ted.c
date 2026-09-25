@@ -36,7 +36,6 @@
 #include "videoarch.h"
 
 #include "alarm.h"
-#include "dma.h"
 #include "lib.h"
 #include "log.h"
 #include "machine.h"
@@ -53,6 +52,7 @@
 #include "ted-cmdline-options.h"
 #include "ted-color.h"
 #include "ted-draw.h"
+#include "ted-counter.h"
 #include "ted-fetch.h"
 #include "ted-irq.h"
 #include "ted-mem.h"
@@ -70,8 +70,6 @@
 
 
 ted_t ted;
-static CLOCK old_maincpu_clk = 0;
-static CLOCK old_cycle = 0;
 
 CLOCK last_write_cycle;
 CLOCK first_write_cycle;
@@ -90,87 +88,6 @@ void ted_change_timing(machine_timing_t *machine_timing, int bordermode)
     }
     /* this should go to ted_chip_model_init() incase we ever go that far */
     ted_color_update_palette(ted.raster.canvas);
-}
-
-void ted_delay_oldclk(CLOCK num)
-{
-    old_maincpu_clk += num;
-    old_cycle += num;
-}
-
-void ted_delay_clk(void)
-{
-    CLOCK diff;
-
-    /*log_debug(LOG_DEFAULT, "MCLK %d OMCLK %d", maincpu_clk, old_maincpu_clk);*/
-
-    if (ted.fastmode == 0) {
-        diff = maincpu_clk - old_maincpu_clk - ((old_cycle & 1) ^ 1);
-        dma_maincpu_steal_cycles(maincpu_clk, diff, 0);
-    } else {
-fastloop:
-        diff = maincpu_clk - old_maincpu_clk;
-
-        if (ted.character_fetch_on) {
-            /* Fast mode, with character fetches,
-               every even cycle is stolen from cycle 4 till cycle 100
-               this covers 5 RAM refresh, 40 graphic fetch, and 4 idle fetch
-               before the window.
-            */
-            if ((old_cycle < 101) && (old_cycle + diff >= 4)) {
-                CLOCK max = 49;
-                if (old_cycle > 3) {
-                    max = (101 - old_cycle) / 2;
-                } else {
-                    diff -= 3 - old_cycle;
-                }
-                if (diff > max) {
-                    diff = max;
-                }
-                dma_maincpu_steal_cycles(maincpu_clk, diff, 0);
-            } else if (old_cycle + diff >= 118) {
-                /* Instruction crosses into next line, and potentially
-                   crossing into area where clocking changes.
-                   Call draw alarm, and check if clocking changed.
-                */
-                old_maincpu_clk += 118 - (old_cycle + diff);
-                old_cycle = 4;
-                ted_raster_draw_alarm_handler(0, NULL);
-                goto fastloop;
-            }
-        } else {
-            /* Fast mode, no character fetches,
-               we only have to deal with 5 RAM refresh cycles
-               the following cycles are stolen 92,94,96,98,100.
-            */
-            if ((old_cycle < 101) && (old_cycle + diff >= 92)) {
-                CLOCK max = 5;
-                if (old_cycle > 91) {
-                    max = (101 - old_cycle) / 2;
-                } else {
-                    diff -= 91 - old_cycle;
-                }
-                if (diff > max) {
-                    diff = max;
-                }
-                dma_maincpu_steal_cycles(maincpu_clk, diff, 0);
-            } else if (old_cycle + diff >= 118) {
-                /* Instruction crosses into next line, and potentially
-                   crossing into area where clocking changes.
-                   Call draw alarm, and check if clocking changed.
-                */
-                old_maincpu_clk += 118 - (old_cycle + diff);
-                old_cycle = 4;
-                ted_raster_draw_alarm_handler(0, NULL);
-                goto fastloop;
-            }
-        }
-    }
-
-    old_maincpu_clk = maincpu_clk;
-    old_cycle = TED_RASTER_CYCLE(maincpu_clk) % 114;
-
-    return;
 }
 
 inline void ted_handle_pending_alarms(CLOCK num_write_cycles)
@@ -241,6 +158,10 @@ inline void ted_handle_pending_alarms(CLOCK num_write_cycles)
         }
         while (f);
     }
+    while (maincpu_clk >= ted.draw_clk) {
+        ted_raster_draw_alarm_handler(maincpu_clk - ted.draw_clk, NULL);
+    }
+    ted_counter_update(maincpu_clk);
 }
 
 /* return pixel aspect ratio for current video mode
@@ -385,6 +306,8 @@ void ted_reset(void)
 {
 /*    ted_change_timing();*/
 
+    ted.bitmap_dirty = 0;
+    memset(ted.bitmap_latched, 0, sizeof(ted.bitmap_latched));
     ted_timer_reset();
 
     raster_reset(&ted.raster);
@@ -396,6 +319,9 @@ void ted_reset(void)
 /*    ted_set_geometry();*/
 
     ted.last_emulate_line_clk = 0;
+    ted.counter_clk = ted.counter_overflow_until = 0;
+    ted.counter_increment = 0;
+    ted.row_counter_active = 0;
 
     ted.draw_clk = ted.draw_cycle;
     alarm_set(ted.raster_draw_alarm, ted.draw_clk);
@@ -448,6 +374,8 @@ void ted_powerup(void)
 {
     memset(ted.regs, 0, sizeof(ted.regs));
 
+    ted.draw_ycounter = ted.raster.ycounter;
+    ted.matrix_fetch_pending = 0;
     ted.irq_status = 0;
     ted.raster_irq_line = 0;
     ted.raster_irq_clk = 1;
@@ -457,6 +385,8 @@ void ted_powerup(void)
     ted.force_display_state = 0;
     ted.memory_fetch_done = 0;
     ted.memptr = 0;
+    ted.chr_pos_reload = 0;
+    ted.chr_pos_count = 0;
     ted.memptr_col = 0;
     ted.mem_counter = 0;
     ted.mem_counter_inc = 0;
@@ -466,6 +396,9 @@ void ted_powerup(void)
     ted.idle_data = 0;
     ted.idle_data_location = IDLE_NONE;
     ted.last_emulate_line_clk = 0;
+    ted.counter_clk = ted.counter_overflow_until = 0;
+    ted.counter_increment = 0;
+    ted.row_counter_active = 0;
 
     ted_reset();
 
@@ -718,27 +651,42 @@ void ted_update_video_mode(unsigned int cycle)
    of each line.  */
 void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
 {
-    int in_visible_area;
-
-    in_visible_area = (ted.tv_current_line
-                       >= (unsigned int)ted.first_displayed_line
-                       && ted.tv_current_line
-                       <= (unsigned int)ted.last_displayed_line);
+    ted_counter_update(ted.draw_clk);
 
     if (ted.tv_current_line < ted.screen_height) {
         raster_line_emulate(&ted.raster);
     } else {
-        log_debug(LOG_DEFAULT, "Skip line %u %u", ted.tv_current_line, ted.screen_height);
+        /* Raster-counter writes can extend a frame beyond the canvas.  The
+           line is not drawn, but register changes must still take effect.
+           Otherwise they accumulate across skipped lines and overrun the
+           fixed-size change lists (for example in HNY2013). */
+        raster_changes_apply_all(ted.raster.changes->background);
+        raster_changes_apply_all(ted.raster.changes->foreground);
+        raster_changes_apply_all(ted.raster.changes->border);
+        raster_changes_apply_all(ted.raster.changes->sprites);
+        raster_changes_apply_all(ted.raster.changes->next_line);
+        ted.raster.changes->have_on_this_line = 0;
+    }
+
+    if (ted.bitmap_dirty) {
+        memset(ted.bitmap_latched, 0, sizeof(ted.bitmap_latched));
+        ted.bitmap_dirty = 0;
     }
 
     if (ted.ted_raster_counter == ted.last_dma_line) {
         ted.idle_state = 1;
     }
 
+    ted.matrix_fetch_pending = ted.allow_bad_lines
+        && ted.ted_raster_counter >= ted.first_dma_line
+        && ted.ted_raster_counter < ted.last_dma_line
+        && (ted.ted_raster_counter & 7) == (unsigned int)ted.raster.ysmooth;
+
     ted.tv_current_line++;
     ted.ted_raster_counter++;
     if (ted.ted_raster_counter == ted.screen_height) {
         ted.memptr = 0;
+        ted.chr_pos_reload = 0;
         ted.memptr_col = 0;
         ted.mem_counter = 0;
         ted.chr_pos_count = 0;
@@ -746,13 +694,19 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
         if (!ted.raster.blank) {
             ted.character_fetch_on = 1;
         }
-        ted.raster.ycounter = 0;
+        /* Attributes precede character data by one raster line.  Start at
+           the last sub-address; the first attribute fetch enables the
+           increment to row zero for the following character-data line. */
+        ted.raster.ycounter = ted.raster.blank ? 0 : 7;
+        ted.ycounter_reset_checked = 0;
+        ted.row_counter_active = 0;
     }
     if (ted.ted_raster_counter == 512) {
         ted.ted_raster_counter = 0;
     }
 
     if (ted.ted_raster_counter == 0xcc) {
+        ted.row_counter_active = 0;
         ted.character_fetch_on = 0;
     }
 
@@ -797,34 +751,18 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
 
     }
 
-    if (in_visible_area) {
-/*        log_debug(LOG_DEFAULT, "Idle state %03x, %03x, %d",ted.ted_raster_counter, ted.idle_state, ted.raster.ycounter);*/
-        if (!ted.idle_state) {
-            ted.mem_counter = (ted.mem_counter + ted.mem_counter_inc) & 0x3ff;
-            ted.chr_pos_count = (ted.chr_pos_count + ted.mem_counter_inc) & 0x3ff;
-        }
-
-        ted.mem_counter_inc = TED_SCREEN_TEXTCOLS;
-        /* `ycounter' makes the chip go to idle state when it reaches the
-           maximum value.  */
-        if (ted.raster.ycounter == 6) {
-            ted.memptr_col = ted.mem_counter;
-        }
-        if (ted.raster.ycounter == 7) {
-            ted.memptr = ted.chr_pos_count;
-/*            ted.idle_state = 1;*/
-        }
-        if (!ted.idle_state && ted.allow_bad_lines /*|| ted.bad_line*/) {
-            ted.raster.ycounter = (ted.raster.ycounter + 1) & 0x7;
-            ted.idle_state = 0;
-        }
-        if (ted.force_display_state) {
-            ted.idle_state = 0;
-            ted.force_display_state = 0;
-        }
-        ted.raster.draw_idle_state = ted.idle_state;
-        /*ted.bad_line = 0;*/
+    ted.mem_counter_inc = TED_SCREEN_TEXTCOLS;
+    if (ted.row_counter_active && ted.allow_bad_lines) {
+        ted.raster.ycounter = (ted.raster.ycounter + 1) & 0x7;
+        ted.idle_state = 0;
     }
+    if (ted.force_display_state) {
+        ted.idle_state = 0;
+        ted.force_display_state = 0;
+    }
+    ted.draw_ycounter = ted.raster.ycounter;
+    ted.raster.draw_idle_state = ted.idle_state;
+    /*ted.bad_line = 0;*/
 
     ted.ycounter_reset_checked = 0;
     ted.memory_fetch_done = 0;
@@ -832,8 +770,7 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
     if (ted.ted_raster_counter == ted.first_dma_line) {
         ted.allow_bad_lines = !ted.raster.blank;
     }
-    if (ted.allow_bad_lines &&
-        ((ted.ted_raster_counter & 7) == ((ted.raster.ysmooth + 1) & 7))) {
+    if (ted.matrix_fetch_pending) {
         memcpy(ted.cbuf, ted.cbuf_tmp, ted.mem_counter_inc);
     }
     /* FIXME */

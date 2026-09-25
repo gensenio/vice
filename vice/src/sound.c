@@ -1209,6 +1209,9 @@ int sound_open(void)
         snddata.bufsize = fragsize * fragnr;
         snddata.bufptr = 0;
 
+        /* Devices without an init callback (for example dummy) still need
+           the requested channel count for buffer allocation and mixing. */
+        snddata.sound_output_channels = channels;
         if (pdev->init) {
             channels_cap = channels;
             if (pdev->init(playparam, &speed, &fragsize, &fragnr, &channels_cap)) {
