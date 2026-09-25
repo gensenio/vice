@@ -12,6 +12,8 @@ dnl alllow after the version number.
 m4_define(vice_version_major, 3)
 m4_define(vice_version_minor, 10)
 m4_define(vice_version_build, 0)
+dnl Label of this TED fork, appended as '-label'; leave empty for none.
+m4_define(vice_version_label, ted)
 
 dnl Some people lose their shit if a version ends in .0
 dnl also turns out some people lose it if it doesn't :)
@@ -19,10 +21,10 @@ m4_define(vice_version,
           ifelse(vice_version_build, 0,
                  ifelse(vice_version_label, ,
                         [vice_version_major.vice_version_minor],
-                        [vice_version_major.vice_version_minor]),
+                        [vice_version_major.vice_version_minor-vice_version_label]),
                  ifelse(vice_version_label, ,
                         [vice_version_major.vice_version_minor.vice_version_build],
-                        [vice_version_major.vice_version_minor.vice_version_build])))
+                        [vice_version_major.vice_version_minor.vice_version_build-vice_version_label])))
 
 dnl The major/minor stuff gets replaced in autogen.sh
 AC_INIT([vice], [vice_version])
