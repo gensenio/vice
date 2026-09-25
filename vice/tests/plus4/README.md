@@ -170,8 +170,25 @@ instruction ends, and accounted them with `dma_maincpu_steal_cycles()`. An
 interrupt raised before those clocks but dispatched after them, typically the
 raster IRQ at the start of a line when an instruction crosses into the
 single-clock window, was then moved to the end of a supposed DMA halt and
-taken one instruction late. The stretch now advances the CPU clock and the
-pending interrupt clocks without recording a DMA halt.
+taken one instruction late. The stretch now advances the CPU clock without
+recording a DMA halt.
+
+The 7501 takes an interrupt once it has seen the request during two of its
+cycles; YapeSDL (`IRQcount`) and plus4emu (`interruptDelayRegister`) count
+CPU cycles. VICE's CPU core counts two clocks, which is one CPU cycle in
+single clock. TED now passes the core the clock that ends this delay after
+the second CPU cycle from the request (`ted_delay_irq_clk()`, all TED IRQ
+sources). The shared CPU core is unchanged. Its one-cycle delay after a taken
+branch is still counted in clocks.
+
+The raster IRQ is raised at cycle 0 of every line. The extra cycle on line 0
+(marked FIXME, and already disabled for `$FF1C/$FF1D` writes) is removed:
+YapeSDL, plus4emu and FPGATED treat line 0 like the others. FPGATED raises it
+about one cycle earlier than the two emulators, which is not adopted.
+
+`ted-irq-test.c` checks the converted clock for a request on a TED slot in
+single clock. `ted-clock-test.c` compares `ted_delay_irq_clk()` with a
+per-slot count over two lines in all clock modes.
 
 Lykia 1.4's title screen enters its raster IRQ through a 14-entry
 `$FF1E`/`CMP #$C9` stabilizer (offsets 0–13). With the defect, 6 of 7506

@@ -35,11 +35,13 @@
 #include "types.h"
 
 
+/* Requests are passed to the CPU core with `ted_delay_irq_clk()', so that
+   its interrupt delay counts CPU cycles in single clock too.  */
 void ted_irq_set_line(void)
 {
     if (ted.irq_status & ted.regs[0x0a] & 0xfe) {
         ted.irq_status |= 0x80;
-        maincpu_set_irq(ted.int_num, 1);
+        maincpu_set_irq_clk(ted.int_num, 1, ted_delay_irq_clk(maincpu_clk));
     } else {
         ted.irq_status &= 0x7f;
         maincpu_set_irq(ted.int_num, 0);
@@ -50,7 +52,7 @@ static inline void ted_irq_set_line_clk(CLOCK mclk)
 {
     if (ted.irq_status & ted.regs[0xa] & 0xfe) {
         ted.irq_status |= 0x80;
-        maincpu_set_irq_clk(ted.int_num, 1, mclk);
+        maincpu_set_irq_clk(ted.int_num, 1, ted_delay_irq_clk(mclk));
     } else {
         ted.irq_status &= 0x7f;
         maincpu_set_irq_clk(ted.int_num, 0, mclk);
@@ -116,15 +118,9 @@ void ted_irq_set_raster_line(unsigned int line)
         unsigned int current_line = TED_RASTER_Y(maincpu_clk);
         /* int casts are to ensure that subtraction can become negative */
         ted.raster_irq_clk = (TED_LINE_START_CLK(maincpu_clk)
-                              + TED_RASTER_IRQ_DELAY - INTERRUPT_DELAY
+                              + TED_RASTER_IRQ_CYCLE
                               + (ted.cycles_per_line
                                  * ((int)line - (int)current_line)));
-
-        /* Raster interrupts on line 0 are delayed by 1 cycle.  */
-        /* FIXME this needs to be checked */
-        if (line == 0) {
-            ted.raster_irq_clk++;
-        }
 
         if (line <= current_line) {
             ted.raster_irq_clk += ((current_line >= ted.screen_height ? 512 : ted.screen_height)
@@ -136,7 +132,7 @@ void ted_irq_set_raster_line(unsigned int line)
         if (current_line >= ted.screen_height) {
             /* int casts are to ensure that subtraction can become negative */
             ted.raster_irq_clk = (TED_LINE_START_CLK(maincpu_clk)
-                                  + TED_RASTER_IRQ_DELAY - INTERRUPT_DELAY
+                                  + TED_RASTER_IRQ_CYCLE
                                   + (ted.cycles_per_line
                                      * ((int)line - (int)current_line)));
 
