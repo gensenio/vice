@@ -280,13 +280,18 @@ inline static void ted06_store(const uint8_t value)
 
     /* This is the funniest part... handle bad line tricks.  */
 
-    if ((ted.dma_line == ted.first_dma_line) && (value & 0x10) != 0) {
+    /* DEN can enable the display after the start-of-frame check.  The CPU
+       clock must follow the display enable latch on this line too.  The
+       row counter starts as at the start of the frame (see
+       `ted_raster_draw_alarm_handler()'): attributes precede character data
+       by one line.  A write that finds the display already enabled does not
+       initialize it again.  */
+    if ((ted.dma_line == ted.first_dma_line) && (value & 0x10) != 0
+        && !ted.allow_bad_lines) {
         ted.allow_bad_lines = 1;
-        /* DEN can enable the display after the start-of-frame check.  The
-           CPU clock must follow the display enable latch on this line too. */
         ted.character_fetch_on = 1;
-        ted.raster.ycounter = 0;         /* should be 7 actually */
-        ted.draw_ycounter = 0;
+        ted.raster.ycounter = 7;
+        ted.draw_ycounter = 7;
     }
 
     if ((ted.raster.ysmooth != (value & 7))

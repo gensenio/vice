@@ -477,6 +477,30 @@ text colour above the shrinking BASIC screen and a blank line of its white
 background below it. The test writes both directions at every cycle. The
 snapshot loader now also restores the flag from `$ff07`.
 
+## Display enable on line 0
+
+```sh
+sh tests/plus4/run-den-test.sh /path/to/configured/build
+```
+
+A `$ff06` write with DEN set on raster line 0 reset the row counter to 0
+(marked "should be 7 actually") on every such write. The start of the frame
+sets it to 7 because attributes precede character data by one line; the
+first attribute DMA then advances it to 0 for the character-data line. With
+0, every character row began one line early: the attribute line was drawn
+with the new row's position and row 0 before its character DMA, one wrong
+line per row. YapeSDL initializes the row counter to 7 on such a write only
+if attribute fetching has not started (`!attribFetch`), plus4emu only when DEN
+changes to set on line 0 and the display is not yet rendering
+(`initializeDisplay`), and FPGATED latches its display enable on line 0.
+VICE now initializes only when the display was not enabled at the start of
+the frame (`allow_bad_lines`), and to 7.
+
+Return to Promised Land's scrolling logo writes `$3b` to `$ff06` on line 0 of
+every frame; it showed short wrong segments on one line per character row.
+Matched frames now agree with YapeSDL except at the edges of the 38 column
+window. The test writes both cases at every cycle of line 0.
+
 ## Attribute DMA requested in the middle of a line
 
 ```sh
