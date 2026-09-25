@@ -421,3 +421,29 @@ border and stores `$81` in RAM at `$ffff`: with ROM selected the idle line
 must show `$fc`, with RAM selected (`$ff3f`) `$81`. DRAM refresh addresses
 read during the refresh cycles, and the CPU bus seen by YapeSDL in double
 clock mode, are not modelled.
+
+## Hires bitmap scroll gap colour
+
+```sh
+python3 tests/plus4/run-bitmap-gap-test.py /path/to/xplus4
+```
+
+In hires bitmap mode VICE takes the colour of the overscan and of the pixels
+uncovered by a horizontal scroll from the last character of the previous
+line. It combined the two nibbles of the video matrix byte (`vbuf & $7f`),
+while the character's own 0 pixels use the low nibble of the video matrix
+and the luminance in bits 4–6 of the attribute (`_draw_hires_bitmap`; the
+same combination is YapeSDL's `hi_bitmap` `col[0]`, and YapeSDL fills the
+40 column scroll gap with the last character). Lines with a mid-line `$ff07`
+write are drawn with raster changes, which paint that colour into the gap,
+so Alpharay's Puls4r logo, which writes a random scroll on each line after
+the display window has opened, showed dark grey fragments at the left edge
+and inside the line. The overscan colour is now the 0 pixel colour of the
+last character.
+
+The test fills the bitmap with 0 pixels in cells with attribute `$70` and
+video `$01` (white 0 pixels, dark grey for `$01`), starts line 100 with a
+scroll of 4 and sets 0 in the middle of the line. The four gap pixels of
+lines 99 and 100 must have the display colour; the previous build drew dark
+grey on line 100. Lines drawn from the cache still fill the gap with `$ff15`,
+as before.
