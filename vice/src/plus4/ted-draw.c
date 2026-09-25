@@ -474,12 +474,20 @@ inline static void _draw_hires_bitmap(uint8_t *p, unsigned int xs,
     }
 }
 
+/* Overscan color in HIRES is determined by last char of previous line: the
+   color of its 0 pixels, the low nibble of the video matrix with the
+   luminance in bits 4-6 of the attribute, as in `_draw_hires_bitmap()'.  */
+inline static uint8_t hires_bitmap_overscan_color(void)
+{
+    return (ted.cbuf[TED_SCREEN_TEXTCOLS - 1] & 0x70)
+           | (ted.vbuf[TED_SCREEN_TEXTCOLS - 1] & 0x0f);
+}
+
 static void draw_hires_bitmap(void)
 {
     ALIGN_DRAW_FUNC(_draw_hires_bitmap, 0, TED_SCREEN_TEXTCOLS - 1);
 
-    /* Overscan color in HIRES is determined by last char of previous line */
-    ted.raster.idle_background_color = ted.vbuf[TED_SCREEN_TEXTCOLS - 1] & 0x7f;
+    ted.raster.idle_background_color = hires_bitmap_overscan_color();
 }
 
 static void draw_hires_bitmap_cached(raster_cache_t *cache, unsigned int xs,
@@ -487,9 +495,8 @@ static void draw_hires_bitmap_cached(raster_cache_t *cache, unsigned int xs,
 {
     ALIGN_DRAW_FUNC(_draw_hires_bitmap, xs, xe);
 
-    /* Overscan color in HIRES is determined by last char of previous line */
     if (xe == TED_SCREEN_TEXTCOLS - 1) {
-        ted.raster.idle_background_color = ted.vbuf[TED_SCREEN_TEXTCOLS - 1] & 0x7f;
+        ted.raster.idle_background_color = hires_bitmap_overscan_color();
     }
 }
 
