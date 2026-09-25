@@ -34,9 +34,43 @@
 #include "dma.h"
 #include "maincpu.h"
 #include "ted-fetch.h"
+#include "ted-counter.h"
 #include "tedtypes.h"
 #include "types.h"
 
+
+/* Keep the value already fetched by TED when the CPU overwrites bitmap RAM
+   before the deferred raster draw.  The ordinary no-write path still reads
+   RAM directly; no full bitmap or scanline copy is needed. */
+void ted_fetch_store(uint16_t addr, uint8_t old_value, unsigned int ram_mask)
+{
+    unsigned int base = (ted.regs[0x12] & 0x38) << 10;
+    unsigned int column;
+    unsigned int cycle;
+
+    if (!(ted.regs[0x06] & 0x20) || (ted.regs[0x12] & 4)
+        || !ted.character_fetch_on || ted.idle_state
+        || ((addr ^ base) & ram_mask & 0xe000)) {
+        return;
+    }
+
+    ted_counter_update(maincpu_clk);
+    if ((addr & 7) != ted.raster.ycounter) {
+        return;
+    }
+    column = ((((addr - base) & 0x1fff) >> 3) - ted.memptr) & 0x3ff;
+    cycle = TED_RASTER_CYCLE(maincpu_clk);
+    /* Once the entire cell has passed the output, including the maximum
+       horizontal scroll, its fetched byte cannot depend on this store.
+       Keep writes near the fetch boundary on the existing path until the
+       internal latch phase is represented independently of the renderer. */
+    if (column < TED_SCREEN_TEXTCOLS && cycle >= 20 + column * 2
+        && !ted.bitmap_latched[column]) {
+        ted.bitmap_data[column] = old_value;
+        ted.bitmap_latched[column] = 1;
+        ted.bitmap_dirty = 1;
+    }
+}
 
 /* Emulate a matrix line fetch, `num' bytes starting from `offs'.  This takes
    care of the 10-bit counter wraparound.  */
@@ -45,13 +79,12 @@ void ted_fetch_matrix(int offs, int num)
     uint8_t *p;
     int start_char;
     int c;
-    int dma_offset = (ted.ted_raster_counter & 7)
-                     == (unsigned int)((ted.raster.ysmooth + 1) & 7) ? 0x0400 : 0;
 
     /* Matrix fetches are done during Phi2, the fabulous "bad lines" */
-    p = ted.screen_ptr;
+    p = (ted.ted_raster_counter & 7) == (unsigned int)ted.raster.ysmooth
+        ? ted.color_ptr : ted.screen_ptr;
 
-    start_char = (ted.memptr_col + offs + dma_offset) & 0x3ff;
+    start_char = (ted.memptr_col + offs) & 0x3ff;
     c = 0x3ff - start_char + 1;
 
     if (c >= num) {
@@ -94,11 +127,8 @@ inline static int do_matrix_fetch(CLOCK sub)
         raster = &ted.raster;
 
         ted.memory_fetch_done = 1;
-        ted.mem_counter = ted.memptr_col;
-        ted.chr_pos_count = ted.memptr;         /* FIXME this is not here */
 
-        if ((ted.ted_raster_counter & 7)
-            == (unsigned int)((raster->ysmooth + 1) & 7)
+        if (ted.matrix_fetch_pending
             && ted.allow_bad_lines
             && ted.ted_raster_counter > ted.first_dma_line
             /* && ted.bad_line */
@@ -113,9 +143,6 @@ inline static int do_matrix_fetch(CLOCK sub)
             ted.ycounter_reset_checked = 1;
             ted.memory_fetch_done = 2;
 
-            dma_maincpu_steal_cycles(ted.fetch_clk,
-                                     (TED_SCREEN_TEXTCOLS + 3) * 2 - sub, 0);
-            ted_delay_oldclk((TED_SCREEN_TEXTCOLS + 3) * 2 - sub);
             ted.bad_line = 1;
             reval = 1;
         }
@@ -124,6 +151,7 @@ inline static int do_matrix_fetch(CLOCK sub)
             && ted.allow_bad_lines
             && ted.ted_raster_counter >= ted.first_dma_line
             && ted.ted_raster_counter < ted.last_dma_line) {
+            ted.row_counter_active = 1;
             ted_fetch_color(0, TED_SCREEN_TEXTCOLS);
 /*
             raster->draw_idle_state = 0;
@@ -134,13 +162,17 @@ inline static int do_matrix_fetch(CLOCK sub)
             ted.ycounter_reset_checked = 1;
             ted.memory_fetch_done = 2;
 */
-            dma_maincpu_steal_cycles(ted.fetch_clk,
-                                     (TED_SCREEN_TEXTCOLS + 3) * 2 - sub, 0);
-            ted_delay_oldclk((TED_SCREEN_TEXTCOLS + 3) * 2 - sub);
 
             ted.bad_line = 1;
             reval = 1;
         }
+    }
+
+    if (reval) {
+        /* Both DMA requests share one bus-ownership interval. */
+        dma_maincpu_steal_cycles(ted.fetch_clk,
+                                 (TED_SCREEN_TEXTCOLS + 3) * 2 - sub, 0);
+        ted_delay_oldclk((TED_SCREEN_TEXTCOLS + 3) * 2 - sub);
     }
 
     return reval;

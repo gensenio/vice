@@ -45,10 +45,6 @@ static alarm_t *ted_t1_alarm = NULL;
 static alarm_t *ted_t2_alarm = NULL;
 static alarm_t *ted_t3_alarm = NULL;
 
-/* static CLOCK t1_start; */
-static CLOCK t2_start;
-static CLOCK t3_start;
-
 static CLOCK t1_last_restart;
 static CLOCK t2_last_restart;
 static CLOCK t3_last_restart;
@@ -63,35 +59,34 @@ static void ted_t1_alarm_handler(CLOCK offset, void *data)
 {
     alarm_set(ted_t1_alarm, maincpu_clk
               + (ted.t1_start == 0 ? 65536 : ted.t1_start) * 2 - offset);
-    t1_value = (ted.t1_start == 0 ? 65536 : ted.t1_start) * 2 - offset;
+    /* Keep the value at the restart clock; reads account for offset once. */
+    t1_value = (ted.t1_start == 0 ? 65536 : ted.t1_start) * 2;
 #ifdef DEBUG_TIMER
     log_debug(LOG_DEFAULT, "TI1 ALARM %x", maincpu_clk);
 #endif
-    ted_irq_timer1_set();
+    ted_irq_timer1_set(maincpu_clk - offset);
     t1_last_restart = maincpu_clk - offset;
 }
 
 static void ted_t2_alarm_handler(CLOCK offset, void *data)
 {
     alarm_set(ted_t2_alarm, maincpu_clk + 65536 * 2 - offset);
-    t2_start = 0;
-    t2_value = 65536 * 2 - offset;
+    t2_value = 65536 * 2;
 #ifdef DEBUG_TIMER
     log_debug(LOG_DEFAULT, "TI2 ALARM %x", maincpu_clk);
 #endif
-    ted_irq_timer2_set();
+    ted_irq_timer2_set(maincpu_clk - offset);
     t2_last_restart = maincpu_clk - offset;
 }
 
 static void ted_t3_alarm_handler(CLOCK offset, void *data)
 {
     alarm_set(ted_t3_alarm, maincpu_clk + 65536 * 2 - offset);
-    t3_start = 0;
-    t3_value = 65536 * 2 - offset;
+    t3_value = 65536 * 2;
 #ifdef DEBUG_TIMER
     log_debug(LOG_DEFAULT, "TI3 ALARM %x", maincpu_clk);
 #endif
-    ted_irq_timer3_set();
+    ted_irq_timer3_set(maincpu_clk - offset);
     t3_last_restart = maincpu_clk - offset;
 }
 
@@ -121,16 +116,23 @@ static void ted_timer_t1_store_high(uint8_t value)
 static void ted_timer_t2_store_low(uint8_t value)
 {
     alarm_unset(ted_t2_alarm);
-    t2_value = (t2_start = (t2_start & 0xff00) | value) << 1;
+    /* Writes replace only one byte of the live counter. */
+    if (ted.timer_running[1]) {
+        t2_value -= maincpu_clk - t2_last_restart;
+    }
+    t2_value = (t2_value & 0x1fe00) | ((CLOCK)value << 1);
     ted.timer_running[1] = 0;
 }
 
 static void ted_timer_t2_store_high(uint8_t value)
 {
     alarm_unset(ted_t2_alarm);
-    t2_value = (t2_start = (t2_start & 0x00ff) | (value << 8)) << 1;
+    if (ted.timer_running[1]) {
+        t2_value -= maincpu_clk - t2_last_restart;
+    }
+    t2_value = (t2_value & 0x1fe) | ((CLOCK)value << 9);
     alarm_set(ted_t2_alarm, maincpu_clk
-              + (t2_start == 0 ? 65536 : t2_start) * 2);
+              + (t2_value == 0 ? 65536 * 2 : t2_value));
     t2_last_restart = maincpu_clk;
     ted.timer_running[1] = 1;
 }
@@ -138,16 +140,23 @@ static void ted_timer_t2_store_high(uint8_t value)
 static void ted_timer_t3_store_low(uint8_t value)
 {
     alarm_unset(ted_t3_alarm);
-    t3_value = (t3_start = (t3_start & 0xff00) | value) << 1;
+    /* Writes replace only one byte of the live counter. */
+    if (ted.timer_running[2]) {
+        t3_value -= maincpu_clk - t3_last_restart;
+    }
+    t3_value = (t3_value & 0x1fe00) | ((CLOCK)value << 1);
     ted.timer_running[2] = 0;
 }
 
 static void ted_timer_t3_store_high(uint8_t value)
 {
     alarm_unset(ted_t3_alarm);
-    t3_value = (t3_start = (t3_start & 0x00ff) | (value << 8)) << 1;
+    if (ted.timer_running[2]) {
+        t3_value -= maincpu_clk - t3_last_restart;
+    }
+    t3_value = (t3_value & 0x1fe) | ((CLOCK)value << 9);
     alarm_set(ted_t3_alarm, maincpu_clk
-              + (t3_start == 0 ? 65536 : t3_start) * 2);
+              + (t3_value == 0 ? 65536 * 2 : t3_value));
     t3_last_restart = maincpu_clk;
     ted.timer_running[2] = 1;
 }
@@ -286,4 +295,7 @@ void ted_timer_reset(void)
     ted.t1_start = 0;
     alarm_unset(ted_t2_alarm);
     alarm_unset(ted_t3_alarm);
+    t1_value = t2_value = t3_value = 0;
+    t1_last_restart = t2_last_restart = t3_last_restart = maincpu_clk;
+    ted.timer_running[0] = ted.timer_running[1] = ted.timer_running[2] = 0;
 }

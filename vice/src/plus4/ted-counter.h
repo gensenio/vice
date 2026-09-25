@@ -1,8 +1,5 @@
 /*
- * ted-irq.c - IRQ related functions for the TED emulation.
- *
- * Written by
- *  Andreas Boose <viceteam@t-online.de>
+ * ted-counter.h - TED counter interface.
  *
  * This file is part of VICE, the Versatile Commodore Emulator.
  * See README for copyright notice.
@@ -24,25 +21,13 @@
  *
  */
 
-#ifndef VICE_TED_IRQ_H
-#define VICE_TED_IRQ_H
+#ifndef VICE_TED_COUNTER_H
+#define VICE_TED_COUNTER_H
 
 #include "types.h"
 
-void ted_irq_raster_set(CLOCK mclk);
-void ted_irq_raster_clear(CLOCK mclk);
-void ted_irq_timer1_set(CLOCK mclk);
-void ted_irq_timer1_clear(void);
-void ted_irq_timer2_set(CLOCK mclk);
-void ted_irq_timer2_clear(void);
-void ted_irq_timer3_set(CLOCK mclk);
-void ted_irq_timer3_clear(void);
-
-void ted_irq_set_raster_line(unsigned int line);
-void ted_irq_check_state(uint8_t value, unsigned int high);
-void ted_irq_set_line(void);
-void ted_irq_next_frame(void);
-
-void ted_irq_init(void);
+void ted_counter_update(CLOCK clk);
+void ted_counter_store(uint8_t value);
+unsigned int ted_counter_read(void);
 
 #endif

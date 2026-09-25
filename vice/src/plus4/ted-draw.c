@@ -210,7 +210,7 @@ static int get_std_text(raster_cache_t *cache, unsigned int *xs,
                              ted.chargen_ptr,
                              8,   /* FIXME */
                              TED_SCREEN_TEXTCOLS,
-                             ted.raster.ycounter,
+                             ted.draw_ycounter,
                              xs, xe,
                              rr,
                              cursor_pos);
@@ -239,7 +239,7 @@ inline static void _draw_std_text(uint8_t *p, unsigned int xs, unsigned int xe)
     int cursor_pos = -1;
 
     table_ptr = hr_table + (ted.raster.background_color << 4);
-    char_ptr = ted.chargen_ptr + ted.raster.ycounter;
+    char_ptr = ted.chargen_ptr + ted.draw_ycounter;
 
     if (ted.cursor_visible) {
         int crsrpos = ted.crsrpos - ted.memptr;
@@ -359,7 +359,7 @@ static void draw_std_text_foreground(unsigned int start_char, unsigned int end_c
     uint8_t *p;
     int cursor_pos = -1;
 
-    char_ptr = ted.chargen_ptr + ted.raster.ycounter;
+    char_ptr = ted.chargen_ptr + ted.draw_ycounter;
     p = GFX_PTR() + 8 * start_char;
 
     if (ted.cursor_visible) {
@@ -409,6 +409,27 @@ static void draw_std_text_foreground(unsigned int start_char, unsigned int end_c
     Hires Bitmap mode.
 */
 
+static int get_bitmap_data(raster_cache_t *cache, unsigned int *xs,
+                           unsigned int *xe, int rr)
+{
+    uint8_t data[TED_SCREEN_TEXTCOLS];
+    unsigned int i, j;
+
+    if (!ted.bitmap_dirty) {
+        return raster_cache_data_fill_1fff(cache->foreground_data,
+                                          ted.bitmap_ptr,
+                                          ted.bitmap_ptr + 0x1000,
+                                          ted.memptr * 8 + ted.draw_ycounter,
+                                          TED_SCREEN_TEXTCOLS, xs, xe, rr);
+    }
+    for (i = 0, j = ((ted.memptr << 3) + ted.draw_ycounter) & 0x1fff;
+         i < TED_SCREEN_TEXTCOLS; i++, j = (j + 8) & 0x1fff) {
+        data[i] = ted.bitmap_latched[i] ? ted.bitmap_data[i] : ted.bitmap_ptr[j];
+    }
+    return raster_cache_data_fill(cache->foreground_data, data,
+                                  TED_SCREEN_TEXTCOLS, xs, xe, rr);
+}
+
 static int get_hires_bitmap(raster_cache_t *cache, unsigned int *xs,
                             unsigned int *xe, int rr)
 {
@@ -426,13 +447,7 @@ static int get_hires_bitmap(raster_cache_t *cache, unsigned int *xs,
                                 TED_SCREEN_TEXTCOLS,
                                 xs, xe,
                                 rr);
-    r |= raster_cache_data_fill_1fff(cache->foreground_data,
-                                     ted.bitmap_ptr,
-                                     ted.bitmap_ptr + 0x1000,
-                                     ted.memptr * 8 + ted.raster.ycounter,
-                                     TED_SCREEN_TEXTCOLS,
-                                     xs, xe,
-                                     rr);
+    r |= get_bitmap_data(cache, xs, xe, rr);
     return r;
 }
 
@@ -445,7 +460,7 @@ inline static void _draw_hires_bitmap(uint8_t *p, unsigned int xs,
 
     bmptr = ted.bitmap_ptr;
 
-    for (j = ((ted.memptr << 3) + ted.raster.ycounter + xs * 8) & 0x1fff, i = xs;
+    for (j = ((ted.memptr << 3) + ted.draw_ycounter + xs * 8) & 0x1fff, i = xs;
          i <= xe; i++, j = (j + 8) & 0x1fff) {
         int d;
 
@@ -453,7 +468,7 @@ inline static void _draw_hires_bitmap(uint8_t *p, unsigned int xs,
               + ((ted.cbuf[i] & 0x07) << 15) + ((ted.vbuf[i] & 0xf0) << 7)
               + ((ted.cbuf[i] & 0x70) << 4) + ((ted.vbuf[i] & 0x0f) << 4);
 
-        d = bmptr[j];
+        d = ted.bitmap_latched[i] ? ted.bitmap_data[i] : bmptr[j];
         *((uint32_t *)p + i * 2) = *(ptr + (d >> 4));
         *((uint32_t *)p + i * 2 + 1) = *(ptr + (d & 0xf));
     }
@@ -506,7 +521,7 @@ static int get_mc_text(raster_cache_t *cache, unsigned int *xs,
 
     r = raster_cache_data_fill_text(cache->foreground_data,
                                     ted.vbuf,
-                                    ted.chargen_ptr + ted.raster.ycounter,
+                                    ted.chargen_ptr + ted.draw_ycounter,
                                     TED_SCREEN_TEXTCOLS,
                                     xs, xe,
                                     rr);
@@ -525,7 +540,7 @@ inline static void _draw_mc_text(uint8_t *p, unsigned int xs, unsigned int xe)
     uint16_t *ptmp;
     unsigned int i, v, d;
 
-    char_ptr = ted.chargen_ptr + ted.raster.ycounter;
+    char_ptr = ted.chargen_ptr + ted.draw_ycounter;
 
     c[1] = c[0] = ted.raster.background_color;
     c[3] = c[2] = ted.ext_background_color[0];
@@ -611,7 +626,7 @@ static void draw_mc_text_foreground(unsigned int start_char, unsigned int end_ch
     uint8_t *p;
     unsigned int i;
 
-    char_ptr = ted.chargen_ptr + ted.raster.ycounter;
+    char_ptr = ted.chargen_ptr + ted.draw_ycounter;
     c1 = ted.ext_background_color[0];
     c2 = ted.ext_background_color[1];
     p = GFX_PTR() + 8 * start_char;
@@ -660,13 +675,7 @@ static int get_mc_bitmap(raster_cache_t *cache, unsigned int *xs,
                                 TED_SCREEN_TEXTCOLS,
                                 xs, xe,
                                 rr);
-    r |= raster_cache_data_fill_1fff(cache->foreground_data,
-                                     ted.bitmap_ptr,
-                                     ted.bitmap_ptr + 0x1000,
-                                     ted.memptr * 8 + ted.raster.ycounter,
-                                     TED_SCREEN_TEXTCOLS,
-                                     xs, xe,
-                                     rr);
+    r |= get_bitmap_data(cache, xs, xe, rr);
     return r;
 }
 
@@ -682,11 +691,11 @@ inline static void _draw_mc_bitmap(uint8_t *p, unsigned int xs, unsigned int xe)
     c[3] = ted.ext_background_color[0];
 
     ptmp = p + xs * 8;
-    for (j = ((ted.memptr << 3) + ted.raster.ycounter + xs * 8) & 0x1fff,
+    for (j = ((ted.memptr << 3) + ted.draw_ycounter + xs * 8) & 0x1fff,
          i = xs; i <= xe; i++, j = (j + 8) & 0x1fff) {
         unsigned int d;
 
-        d = bmptr[j];
+        d = ted.bitmap_latched[i] ? ted.bitmap_data[i] : bmptr[j];
 
         c[1] = (ted.vbuf[i] >> 4) + ((ted.cbuf[i] & 0x07) << 4);
         c[2] = (ted.vbuf[i] & 0x0f) + (ted.cbuf[i] & 0x70);
@@ -720,7 +729,7 @@ static void draw_mc_bitmap_foreground(unsigned int start_char,
     p = GFX_PTR() + 8 * start_char;
     bmptr = ted.bitmap_ptr;
 
-    for (j = ((ted.memptr << 3) + ted.raster.ycounter + 8 * start_char) & 0x1fff,
+    for (j = ((ted.memptr << 3) + ted.draw_ycounter + 8 * start_char) & 0x1fff,
          i = start_char; i <= end_char; j = (j + 8) & 0x1fff, i++, p += 8) {
         uint8_t c1, c2, c3;
         uint8_t b;
@@ -728,7 +737,7 @@ static void draw_mc_bitmap_foreground(unsigned int start_char,
         c1 = (ted.vbuf[i] >> 4) + ((ted.cbuf[i] & 0x07) << 4);
         c2 = (ted.vbuf[i] & 0x0f) + (ted.cbuf[i] & 0x70);
         c3 = ted.ext_background_color[0];
-        b = bmptr[j];
+        b = ted.bitmap_latched[i] ? ted.bitmap_data[i] : bmptr[j];
 
         DRAW_MC_BYTE(p, b, c1, c2, c3);
     }
@@ -760,7 +769,7 @@ static int get_ext_text(raster_cache_t *cache, unsigned int *xs,
                                         ted.chargen_ptr,
                                         8,
                                         TED_SCREEN_TEXTCOLS,
-                                        ted.raster.ycounter,
+                                        ted.draw_ycounter,
                                         xs, xe,
                                         rr);
 
@@ -777,7 +786,7 @@ inline static void _draw_ext_text(uint8_t *p, unsigned int xs, unsigned int xe)
     uint8_t *char_ptr;
     unsigned int i;
 
-    char_ptr = ted.chargen_ptr + ted.raster.ycounter;
+    char_ptr = ted.chargen_ptr + ted.draw_ycounter;
 
     for (i = xs; i <= xe; i++) {
         uint32_t *ptr;
@@ -818,7 +827,7 @@ static void draw_ext_text_foreground(unsigned int start_char,
     uint8_t *char_ptr;
     uint8_t *p;
 
-    char_ptr = ted.chargen_ptr + ted.raster.ycounter;
+    char_ptr = ted.chargen_ptr + ted.draw_ycounter;
     p = GFX_PTR() + 8 * start_char;
 
     for (i = start_char; i <= end_char; i++, p += 8) {

@@ -42,6 +42,7 @@
 #include "sidcart.h"
 #include "sid-resources.h"
 #include "sound.h"
+#include "snapshot.h"
 #include "ted-sound.h"
 
 /* #define DEBUG_TEDSOUND */
@@ -116,6 +117,7 @@ void ted_sound_chip_init(void)
 /* ------------------------------------------------------------------------- */
 
 static uint8_t plus4_sound_data[5];
+static uint8_t last_sound_read;
 
 /* dummy function for now */
 int machine_sid2_check_range(unsigned int sid_adr)
@@ -176,17 +178,17 @@ void machine_sid2_enable(int val)
 }
 
 struct plus4_sound_s {
-    /* Voice 0 collect number of cycles elapsed */
+    /* Voice 0 active sound counter (single clock / 4). */
     uint32_t voice0_accu;
-    /* Voice 0 toggle sign and reload accu if accu reached 0 */
+    /* Voice 0 reload value after counter overflow. */
     uint32_t voice0_reload;
     /* Voice 0 sign of the square wave */
     int16_t voice0_sign;
     uint8_t voice0_output_enabled;
 
-    /* Voice 1 collect number of cycles elapsed */
+    /* Voice 1 active sound counter (single clock / 4). */
     uint32_t voice1_accu;
-    /* Voice 1 toggle sign and reload accu if accu reached 0 */
+    /* Voice 1 reload value after counter overflow. */
     uint32_t voice1_reload;
     /* Voice 1 sign of the square wave */
     int16_t voice1_sign;
@@ -196,46 +198,55 @@ struct plus4_sound_s {
     uint8_t voice1_cached_output;
     uint16_t digital_cached_output;
 
-    uint32_t oscStep;
-
-    /* Volume multiplier  */
+    /* Time is in CPU clocks multiplied by the output sample rate.
+       One sound counter tick takes eight double-speed CPU clocks. */
+    uint32_t tick_length;
+    uint32_t tick_remaining;
+    uint32_t sample_length;
+    uint32_t sample_ticks;
+    uint32_t sample_remainder;
+    uint32_t sample_rate;
+    uint32_t partial_length;
+    uint64_t partial_sum;
+    uint32_t cycle_pending;
+    /* Volume table index. */
     int16_t volume;
-    /* 8 cycles units per sample  */
-    uint32_t speed;
-    uint32_t sample_position_integer;
-    uint32_t sample_position_remainder;
-    uint32_t sample_length_integer;
-    uint32_t sample_length_remainder;
     /* Digital output?  */
     uint8_t digital;
     /* Noise generator active?  */
     uint8_t noise;
     uint8_t noise_shift_register;
+    uint8_t noise_output;
 };
 
 static struct plus4_sound_s snd;
+static int snapshot_loaded;
+#ifdef SOUND_SYSTEM_FLOAT
+static float *primary_buffer;
+#endif
 
 #define CTRL_VOICE0_ENABLE  0x10
 #define CTRL_VOICE1_ENABLE  0x20
 #define CTRL_NOISE_ENABLE   0x40
 #define CTRL_DIGITAL_ENABLE 0x80
 
-#define PRECISION 12
-#define OSCRELOADVAL (0x400 << PRECISION)
+#define OSCRELOADVAL 0x400
 
-/* table derived from sdl-yape:
-    bit 9:         voice1 output=1
-    bit 8:         voice0 output=1
-    bit 7-0 volume (8-f are all the same)
-*/
+/* Mean output levels from TLC's measurements on a Plus/4, 2000-09-07:
+   https://plus4world.powweb.com/ma/1550
+   Subtract the measured idle level (31), average the two single voices,
+   and scale the both-voices maximum (15674) to the existing peak (19976).
+   This models the measured average output, not individual PWM pulses or
+   a universal analogue transfer function for every TED/board revision.
+   Bits 5 and 4 select the active voices; bits 3..0 select volume. */
 static const int16_t volumeTable[4 * 16] = {
     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
     0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-    0x0000, 0x024a, 0x064a, 0x0a4a, 0x0e4a, 0x124a, 0x164a, 0x1a4a,
-    0x1e4a, 0x1e4a, 0x1e4a, 0x1e4a, 0x1e4a, 0x1e4a, 0x1e4a, 0x1e4a,
-    0x0000, 0x024a, 0x064a, 0x0a4a, 0x0e4a, 0x124a, 0x164a, 0x1a4a,
-    0x1e4a, 0x1e4a, 0x1e4a, 0x1e4a, 0x1e4a, 0x1e4a, 0x1e4a, 0x1e4a,
-    0x0000, 0x0494, 0x0cd4, 0x1596, 0x1f30, 0x29a2, 0x34ec, 0x410e,
+    0x0000, 0x0299, 0x076b, 0x0c31, 0x1111, 0x1603, 0x1afb, 0x2009,
+    0x2461, 0x2461, 0x2461, 0x2461, 0x2461, 0x2461, 0x2461, 0x2461,
+    0x0000, 0x0299, 0x076b, 0x0c31, 0x1111, 0x1603, 0x1afb, 0x2009,
+    0x2461, 0x2461, 0x2461, 0x2461, 0x2461, 0x2461, 0x2461, 0x2461,
+    0x0000, 0x0558, 0x0f19, 0x18e7, 0x2323, 0x2d96, 0x3861, 0x43c1,
     0x4e08, 0x4e08, 0x4e08, 0x4e08, 0x4e08, 0x4e08, 0x4e08, 0x4e08
 };
 
@@ -251,100 +262,189 @@ static inline void clock_shift_register(void)
 static inline void reset_shift_register(void)
 {
     snd.noise_shift_register = 0xff;
+    snd.noise_output = CTRL_VOICE1_ENABLE;
 }
 
-/* the general logic was heavily inspired by SDL-YAPE:
+/* The sound counters run at one quarter of the single clock.  Account for
+   every counter tick, including multiple transitions within an output sample.
+   See TLC, "TED Sound Generation Internals", Plus/4 World article 500244.
+   The existing noise sequence/clock is retained; the available descriptions
+   do not settle its exact phase or rate. */
+static void ted_sound_clock(void)
+{
+    /* Register 17 reloads the active counters at the voice increment time
+       while its test bit is set (7360R0 data sheet, page 15). */
+    if (snd.digital) {
+        snd.voice0_accu = snd.voice0_reload;
+        snd.voice1_accu = snd.voice1_reload;
+        return;
+    }
+    if (snd.voice0_reload != 0x3ff) {
+        if (++snd.voice0_accu >= OSCRELOADVAL) {
+            snd.voice0_sign ^= CTRL_VOICE0_ENABLE;
+            snd.voice0_accu = snd.voice0_reload;
+            snd.voice0_cached_output = snd.volume |
+                                      (snd.voice0_sign & snd.voice0_output_enabled);
+        }
+    }
+    if (snd.voice1_reload != 0x3ff) {
+        if (++snd.voice1_accu >= OSCRELOADVAL) {
+            snd.voice1_sign ^= CTRL_VOICE1_ENABLE;
+            snd.voice1_accu = snd.voice1_reload;
+            snd.noise_output = (snd.noise_shift_register & 1) ? CTRL_VOICE1_ENABLE : 0;
+            snd.voice1_cached_output = snd.volume |
+                                      (snd.voice1_sign & snd.voice1_output_enabled) |
+                                      (snd.noise_output & (snd.noise >> 1));
+            clock_shift_register();
+        }
+    }
+}
 
-   https://github.com/calmopyrin/yapesdl/blob/master/tedsound.cpp
- */
+/* Integrate the piecewise constant output over the sample interval.  This
+   reduces aliasing without a look-ahead buffer or a rounded oscillator step.
+   Both sound backends use the same generator and amplitude scale. */
+static uint64_t ted_sound_integrate(uint32_t remaining)
+{
+    uint32_t length = remaining;
+    uint32_t step;
+    uint32_t phase, ticks, next;
+    uint64_t sum = 0;
+
+    /* The sample length is constant until the audio device is reopened.
+       Split it at initialization, avoiding a division for every sample. */
+    if (length == snd.sample_length) {
+        phase = snd.tick_length - snd.tick_remaining + snd.sample_remainder;
+        ticks = snd.sample_ticks;
+    } else {
+        phase = snd.tick_length - snd.tick_remaining + length % snd.tick_length;
+        ticks = length / snd.tick_length;
+    }
+    if (phase >= snd.tick_length) {
+        phase -= snd.tick_length;
+        ticks++;
+    }
+    if (snd.digital) {
+        if (ticks) {
+            ted_sound_clock();
+        }
+        snd.tick_remaining = snd.tick_length - phase;
+        return (uint64_t)snd.digital_cached_output * length;
+    }
+    /* Most audible tones have no transition in this sample.  Batch their
+       counter ticks and avoid integrating a constant output. */
+    if ((snd.voice0_reload == 0x3ff || snd.voice0_accu + ticks < OSCRELOADVAL) &&
+        (snd.voice1_reload == 0x3ff || snd.voice1_accu + ticks < OSCRELOADVAL)) {
+        if (snd.voice0_reload != 0x3ff) {
+            snd.voice0_accu += ticks;
+        }
+        if (snd.voice1_reload != 0x3ff) {
+            snd.voice1_accu += ticks;
+        }
+        snd.tick_remaining = snd.tick_length - phase;
+        return (uint64_t)volumeTable[snd.voice0_cached_output | snd.voice1_cached_output] * length;
+    }
+    /* Between counter overflows the output is constant.  Integrate directly
+       to the next overflow, retaining every noise and tone transition. */
+    while (ticks) {
+        next = ticks + 1;
+        if (snd.voice0_reload != 0x3ff && OSCRELOADVAL - snd.voice0_accu < next) {
+            next = OSCRELOADVAL - snd.voice0_accu;
+        }
+        if (snd.voice1_reload != 0x3ff && OSCRELOADVAL - snd.voice1_accu < next) {
+            next = OSCRELOADVAL - snd.voice1_accu;
+        }
+        if (next > ticks) {
+            break;
+        }
+        step = snd.tick_remaining + (next - 1) * snd.tick_length;
+        sum += (uint64_t)volumeTable[snd.voice0_cached_output |
+                                     snd.voice1_cached_output] * step;
+        remaining -= step;
+        ticks -= next;
+        if (snd.voice0_reload != 0x3ff) {
+            snd.voice0_accu += next - 1;
+        }
+        if (snd.voice1_reload != 0x3ff) {
+            snd.voice1_accu += next - 1;
+        }
+        ted_sound_clock();
+        snd.tick_remaining = snd.tick_length;
+    }
+    sum += (uint64_t)volumeTable[snd.voice0_cached_output |
+                                 snd.voice1_cached_output] * remaining;
+    if (snd.voice0_reload != 0x3ff) {
+        snd.voice0_accu += ticks;
+    }
+    if (snd.voice1_reload != 0x3ff) {
+        snd.voice1_accu += ticks;
+    }
+    snd.tick_remaining = snd.tick_length - phase;
+    return sum;
+}
+
+static int16_t ted_sound_sample(void)
+{
+    return (int16_t)(ted_sound_integrate(snd.sample_length) / snd.sample_length);
+}
+
+/* With no SID cartridge, TED owns the cycle-to-sample conversion.  Keep the
+   unfinished sample across calls so register writes divide its integral at
+   the actual CPU cycle, rather than at the next sample boundary. */
+#ifdef SOUND_SYSTEM_FLOAT
+int ted_sound_calculate_samples(sound_t **psid, float *pbuf, int nr, int scc, CLOCK *delta_t)
+#else
+int ted_sound_calculate_samples(sound_t **psid, int16_t *pbuf, int nr, int soc, int scc, CLOCK *delta_t)
+#endif
+{
+    uint64_t available = (uint64_t)*delta_t * snd.sample_rate + snd.cycle_pending;
+    uint32_t length;
+    int count = 0;
+    int16_t sample;
+
+    snapshot_loaded = 0;
+#ifdef SOUND_SYSTEM_FLOAT
+    primary_buffer = pbuf;
+#endif
+    while (available && count < nr) {
+        length = snd.sample_length - snd.partial_length;
+        if (available < length) {
+            length = (uint32_t)available;
+        }
+        snd.partial_sum += ted_sound_integrate(length);
+        snd.partial_length += length;
+        available -= length;
+        if (snd.partial_length == snd.sample_length) {
+            sample = (int16_t)(snd.partial_sum / snd.sample_length);
+#ifdef SOUND_SYSTEM_FLOAT
+            pbuf[count] = sample / 32767.0f;
+#else
+            pbuf[count * soc] = sample;
+            if (soc == SOUND_OUTPUT_STEREO) {
+                pbuf[count * soc + 1] = sample;
+            }
+#endif
+            count++;
+            snd.partial_sum = 0;
+            snd.partial_length = 0;
+        }
+    }
+    *delta_t = (CLOCK)(available / snd.sample_rate);
+    snd.cycle_pending = (uint32_t)(available % snd.sample_rate);
+    return count;
+}
 
 #ifdef SOUND_SYSTEM_FLOAT
-/* FIXME! only the non-float code below has the new fixed TED sound stuff */
-#warning "only the non-float code has the fixed TED sound stuff"
 static int ted_sound_machine_calculate_samples(sound_t **psid, float *pbuf, int nr, int scc, CLOCK *delta_t)
 {
     int i;
-    int j;
-    int16_t volume;
-    float sample;
 
-    if (snd.digital) {
-        for (i = 0; i < nr; i++) {
-            sample = (snd.volume * (snd.voice0_output_enabled + snd.voice1_output_enabled)) / 32767.0;
-            pbuf[i] = sample;
-        }
-    } else {
-        for (i = 0; i < nr; i++) {
-            snd.sample_position_remainder += snd.sample_length_remainder;
-            if (snd.sample_position_remainder >= snd.speed) {
-                snd.sample_position_remainder -= snd.speed;
-                snd.sample_position_integer++;
-            }
-            snd.sample_position_integer += snd.sample_length_integer;
-            if (snd.sample_position_integer >= 8) {
-                /* Advance state engine */
-                uint32_t ticks = snd.sample_position_integer >> 3;
-                if (snd.voice0_accu <= ticks) {
-                    uint32_t delay = ticks - snd.voice0_accu;
-                    snd.voice0_sign ^= CTRL_VOICE0_ENABLE;
-                    snd.voice0_accu = OSCRELOADVAL - snd.voice0_reload;
-                    if (snd.voice0_accu == 0) {
-                        snd.voice0_accu = OSCRELOADVAL;
-                    }
-                    if (delay >= snd.voice0_accu) {
-                        snd.voice0_sign = ((delay / snd.voice0_accu)
-                                           & 1) ? snd.voice0_sign ^ CTRL_VOICE0_ENABLE
-                                          : snd.voice0_sign;
-                        snd.voice0_accu = snd.voice0_accu - (delay % snd.voice0_accu);
-                    } else {
-                        snd.voice0_accu -= delay;
-                    }
-                } else {
-                    snd.voice0_accu -= ticks;
-                }
-
-                if (snd.voice1_accu <= ticks) {
-                    uint32_t delay = ticks - snd.voice1_accu;
-                    snd.voice1_sign ^= CTRL_VOICE1_ENABLE;
-                    clock_shift_register();
-                    snd.voice1_accu = OSCRELOADVAL - snd.voice1_reload;
-                    if (snd.voice1_accu == 0) {
-                        snd.voice1_accu = OSCRELOADVAL;
-                    }
-                    if (delay >= snd.voice1_accu) {
-                        snd.voice1_sign = ((delay / snd.voice1_accu)
-                                           & 1) ? snd.voice1_sign ^ CTRL_VOICE1_ENABLE
-                                          : snd.voice1_sign;
-                        for (j = 0; j < (int)(delay / snd.voice1_accu); j++) {
-                            clock_shift_register();
-                        }
-                        snd.voice1_accu = snd.voice1_accu - (delay % snd.voice1_accu);
-                    } else {
-                        snd.voice1_accu -= delay;
-                    }
-                } else {
-                    snd.voice1_accu -= ticks;
-                }
-            }
-            snd.sample_position_integer = snd.sample_position_integer & 7;
-
-            volume = 0;
-
-            if (snd.voice0_output_enabled && snd.voice0_sign) {
-                volume += snd.volume;
-            }
-            if (snd.voice1_output_enabled && !snd.noise && snd.voice1_sign) {
-                volume += snd.volume;
-            }
-            if (snd.voice1_output_enabled && snd.noise && (!(snd.noise_shift_register & 1))) {
-                volume += snd.volume;
-            }
-
-
-            sample = volume / 32767.0;
-
-            pbuf[i] = sample;
-        }
+    snapshot_loaded = 0;
+    if (delta_t && !sidcart_enabled()) {
+        memcpy(pbuf, primary_buffer, nr * sizeof(*pbuf));
+        return nr;
+    }
+    for (i = 0; i < nr; i++) {
+        pbuf[i] = ted_sound_sample() / 32767.0f;
     }
     return nr;
 }
@@ -354,54 +454,15 @@ static int ted_sound_machine_calculate_samples(sound_t **psid, int16_t *pbuf, in
     int i;
     int16_t volume;
 
-    if (snd.digital) {
-        for (i = 0; i < nr; i++) {
-            pbuf[i * soc] = sound_audio_mix(pbuf[i * soc], snd.digital_cached_output);
-            if (soc == SOUND_OUTPUT_STEREO) {
-                pbuf[(i * soc) + 1] = sound_audio_mix(pbuf[(i * soc) + 1], snd.digital_cached_output);
-            }
-        }
-    } else {
-        for (i = 0; i < nr; i++) {
-            snd.sample_position_remainder += snd.sample_length_remainder;
-            if (snd.sample_position_remainder >= snd.speed) {
-                snd.sample_position_remainder -= snd.speed;
-                snd.sample_position_integer++;
-            }
-            snd.sample_position_integer += snd.sample_length_integer;
-            if (snd.sample_position_integer >= 8) {
-                /* Advance state engine */
-                if ((snd.voice0_reload & (0x3ff << PRECISION)) != (0x3ff << PRECISION)) {
-                    if((snd.voice0_accu += snd.oscStep) >= OSCRELOADVAL) {
-                        snd.voice0_sign ^= CTRL_VOICE0_ENABLE;
-                        snd.voice0_cached_output = snd.volume | (snd.voice0_sign & snd.voice0_output_enabled);
-                        snd.voice0_accu = snd.voice0_reload + (snd.voice0_accu - OSCRELOADVAL);
-                    }
-                }
-
-                if ((snd.voice1_reload & (0x3ff << PRECISION)) != (0x3ff << PRECISION)) {
-                    if((snd.voice1_accu += snd.oscStep) >= OSCRELOADVAL) {
-                        snd.voice1_sign ^= CTRL_VOICE1_ENABLE;
-                        snd.voice1_cached_output = snd.volume |
-                                                   (snd.voice1_sign & snd.voice1_output_enabled) |
-                                                   (((snd.noise_shift_register & 1) ? CTRL_NOISE_ENABLE : 0) & snd.noise) >> 1;
-                        clock_shift_register();
-                        snd.voice1_accu = snd.voice1_reload + (snd.voice1_accu - OSCRELOADVAL);
-                    }
-                }
-            }
-            snd.sample_position_integer = snd.sample_position_integer & 7;
-#if 0
-printf("%02x: %02x %02x  %02x %02x\n", snd.volume,
-       snd.voice0_output_enabled, snd.voice0_sign,
-       snd.voice1_output_enabled, snd.voice1_sign);
-#endif
-            volume = volumeTable[snd.voice0_cached_output | snd.voice1_cached_output];
-
-            pbuf[i * soc] = sound_audio_mix(pbuf[i * soc], volume);
-            if (soc == SOUND_OUTPUT_STEREO) {
-                pbuf[(i * soc) + 1] = sound_audio_mix(pbuf[(i * soc) + 1], volume);
-            }
+    snapshot_loaded = 0;
+    if (delta_t && !sidcart_enabled()) {
+        return nr;
+    }
+    for (i = 0; i < nr; i++) {
+        volume = ted_sound_sample();
+        pbuf[i * soc] = sound_audio_mix(pbuf[i * soc], volume);
+        if (soc == SOUND_OUTPUT_STEREO) {
+            pbuf[i * soc + 1] = sound_audio_mix(pbuf[i * soc + 1], volume);
         }
     }
     return nr;
@@ -410,43 +471,51 @@ printf("%02x: %02x %02x  %02x %02x\n", snd.volume,
 
 static int ted_sound_machine_init(sound_t *psid, int speed, int cycles_per_sec)
 {
-    uint8_t val;
+    uint16_t addr;
+    struct plus4_sound_s saved = snd;
+    int restore = snapshot_loaded;
 
     DBG(("ted_sound_machine_init speed: %d cycles_per_sec: %d\n", speed, cycles_per_sec));
-    snd.speed = speed;
-    snd.sample_length_integer = cycles_per_sec / speed;
-    snd.sample_length_remainder = cycles_per_sec % speed;
-    snd.sample_position_integer = 0;
-    snd.sample_position_remainder = 0;
-
-    snd.oscStep = (int)(((cycles_per_sec / 8) * (double)(1 << PRECISION)) / (double)(speed) + 0.5);;
-
-    snd.voice0_reload = ((plus4_sound_data[0] | (plus4_sound_data[4] << 8)) + 1) & 0x3ff;
-    snd.voice1_reload = ((plus4_sound_data[1] | (plus4_sound_data[2] << 8)) + 1) & 0x3ff;
-
-    val = plus4_sound_data[3];  /* control register */
-    snd.volume = val & 0x0f;
-    snd.voice0_output_enabled = val & CTRL_VOICE0_ENABLE;
-    snd.voice1_output_enabled = val & CTRL_VOICE1_ENABLE;
-    snd.noise = ((val & 0x60) == CTRL_NOISE_ENABLE) ? CTRL_NOISE_ENABLE : 0;
-    snd.digital = val & CTRL_DIGITAL_ENABLE;
-
-    snd.voice0_sign = 0;
-    snd.voice0_accu = 0;
-    snd.voice1_sign = 0;
-    snd.voice1_accu = 0;
+    memset(&snd, 0, sizeof(snd));
+    snd.sample_length = cycles_per_sec;
+    snd.sample_rate = speed;
+    snd.tick_length = 8 * speed;
+    snd.sample_ticks = snd.sample_length / snd.tick_length;
+    snd.sample_remainder = snd.sample_length % snd.tick_length;
+    snd.tick_remaining = snd.tick_length;
     reset_shift_register();
 
-    snd.voice0_cached_output = 0;
-    snd.voice1_cached_output = 0;
-    snd.digital_cached_output = 0;
-
+    /* Restore frequencies and cached output in the same units as stores.
+       In particular, reopening audio must retain digital volume. */
+    for (addr = 0x0e; addr <= 0x12; addr++) {
+        if (addr != 0x11) {
+            ted_sound_machine_store(psid, addr, plus4_sound_data[addr - 0x0e]);
+        }
+    }
+    ted_sound_machine_store(psid, 0x11, plus4_sound_data[3]);
+    if (restore) {
+        if (saved.sample_rate != snd.sample_rate || saved.sample_length != snd.sample_length) {
+            saved.tick_remaining = (uint32_t)(((uint64_t)saved.tick_remaining * snd.sample_rate
+                                               + saved.sample_rate - 1) / saved.sample_rate);
+            saved.sample_rate = snd.sample_rate;
+            saved.sample_length = snd.sample_length;
+            saved.tick_length = snd.tick_length;
+            saved.sample_ticks = snd.sample_ticks;
+            saved.sample_remainder = snd.sample_remainder;
+            saved.partial_length = 0;
+            saved.partial_sum = 0;
+            saved.cycle_pending = 0;
+        }
+        snd = saved;
+    }
+    snapshot_loaded = 0;
     return 1;
 }
 
 static void ted_sound_machine_store(sound_t *psid, uint16_t addr, uint8_t val)
 {
     unsigned int freq;
+    snapshot_loaded = 0;
     switch (addr) {
         case 0x0e: /* voice0 freq lo */
             plus4_sound_data[0] = val;
@@ -455,25 +524,27 @@ static void ted_sound_machine_store(sound_t *psid, uint16_t addr, uint8_t val)
                 snd.voice0_sign = CTRL_VOICE0_ENABLE;
                 snd.voice0_cached_output = snd.volume | snd.voice0_output_enabled;
             }
-            snd.voice0_reload = ((freq + 1) & 0x3ff) << PRECISION;
+            snd.voice0_reload = (freq + 1) & 0x3ff;
             break;
         case 0x0f: /* voice1 freq lo */
             plus4_sound_data[1] = val;
             freq = plus4_sound_data[1] | (plus4_sound_data[2] << 8);
             if (freq == 0x3fe) {
                 snd.voice1_sign = CTRL_VOICE1_ENABLE;
-                snd.voice1_cached_output = snd.volume | snd.voice1_output_enabled | (snd.noise >> 1);
+                snd.voice1_cached_output = snd.volume | snd.voice1_output_enabled |
+                                           (snd.noise_output & (snd.noise >> 1));
             }
-            snd.voice1_reload = ((freq + 1) & 0x3ff) << PRECISION;
+            snd.voice1_reload = (freq + 1) & 0x3ff;
             break;
         case 0x10: /* voice1 freq hi */
             plus4_sound_data[2] = val & 3;
             freq = plus4_sound_data[1] | (plus4_sound_data[2] << 8);
             if (freq == 0x3fe) {
                 snd.voice1_sign = CTRL_VOICE1_ENABLE;
-                snd.voice1_cached_output = snd.volume | snd.voice1_output_enabled | (snd.noise >> 1);
+                snd.voice1_cached_output = snd.volume | snd.voice1_output_enabled |
+                                           (snd.noise_output & (snd.noise >> 1));
             }
-            snd.voice1_reload = ((freq + 1) & 0x3ff) << PRECISION;
+            snd.voice1_reload = (freq + 1) & 0x3ff;
             break;
         case 0x11:
             /* bit 0-3  volume
@@ -489,9 +560,7 @@ static void ted_sound_machine_store(sound_t *psid, uint16_t addr, uint8_t val)
             snd.digital = val & CTRL_DIGITAL_ENABLE;
             if (snd.digital) {
                 snd.voice0_sign = CTRL_VOICE0_ENABLE;
-                snd.voice0_accu = snd.voice0_reload;
                 snd.voice1_sign = CTRL_VOICE1_ENABLE;
-                snd.voice1_accu = snd.voice1_reload;
                 reset_shift_register();
                 snd.digital_cached_output = volumeTable[val & 0x3f];
             }
@@ -499,7 +568,7 @@ static void ted_sound_machine_store(sound_t *psid, uint16_t addr, uint8_t val)
                                        (snd.voice0_sign & snd.voice0_output_enabled);
             snd.voice1_cached_output = snd.volume |
                                        (snd.voice1_sign & snd.voice1_output_enabled) |
-                                       ((((snd.noise_shift_register & 1) ? CTRL_NOISE_ENABLE : 0) & snd.noise) >> 1);
+                                       (snd.noise_output & (snd.noise >> 1));
             plus4_sound_data[3] = val;
             break;
         case 0x12: /* voice0 freq hi */
@@ -509,7 +578,7 @@ static void ted_sound_machine_store(sound_t *psid, uint16_t addr, uint8_t val)
                 snd.voice0_sign = CTRL_VOICE0_ENABLE;
                 snd.voice0_cached_output = snd.volume | snd.voice0_output_enabled;
             }
-            snd.voice0_reload = ((freq + 1) & 0x3ff) << PRECISION;
+            snd.voice0_reload = (freq + 1) & 0x3ff;
             break;
     }
 #if 0
@@ -548,6 +617,10 @@ void ted_sound_reset(sound_t *psid, CLOCK cpu_clk)
     snd.voice1_accu = 0;
     reset_shift_register();
     snd.digital = 0;
+    snd.partial_length = 0;
+    snd.partial_sum = 0;
+    snd.cycle_pending = 0;
+    snd.tick_remaining = snd.tick_length;
     snd.voice0_cached_output = 0;
     snd.voice1_cached_output = 0;
     snd.digital_cached_output = 0;
@@ -558,10 +631,111 @@ void ted_sound_reset(sound_t *psid, CLOCK cpu_clk)
     }
 }
 
+/* TED module 1.8 appends sound registers, oscillator state and the unfinished
+   output sample.  Do not write native structs: padding and host byte order
+   are not part of the snapshot format. */
+int ted_sound_snapshot_write(snapshot_module_t *m)
+{
+    return SMW_BA(m, plus4_sound_data, 5) < 0
+        || SMW_DW(m, snd.voice0_accu) < 0
+        || SMW_DW(m, snd.voice1_accu) < 0
+        || SMW_B(m, (uint8_t)snd.voice0_sign) < 0
+        || SMW_B(m, (uint8_t)snd.voice1_sign) < 0
+        || SMW_B(m, snd.noise_shift_register) < 0
+        || SMW_B(m, snd.noise_output) < 0
+        || SMW_DW(m, snd.sample_rate) < 0
+        || SMW_DW(m, snd.sample_length) < 0
+        || SMW_DW(m, snd.tick_remaining) < 0
+        || SMW_DW(m, snd.partial_length) < 0
+        || SMW_QW(m, snd.partial_sum) < 0
+        || SMW_DW(m, snd.cycle_pending) < 0 ? -1 : 0;
+}
+
+void ted_sound_snapshot_legacy(const uint8_t *regs)
+{
+    memcpy(plus4_sound_data, regs, 5);
+    plus4_sound_data[2] &= 3;
+    plus4_sound_data[4] &= 3;
+    snapshot_loaded = 0;
+    if (snd.sample_rate) {
+        ted_sound_machine_init(NULL, snd.sample_rate, snd.sample_length);
+    }
+}
+
+int ted_sound_snapshot_read(snapshot_module_t *m)
+{
+    struct plus4_sound_s saved;
+    uint8_t regs[5], sign0, sign1;
+    uint32_t current_rate = snd.sample_rate;
+    uint32_t current_clock = snd.sample_length;
+
+    memset(&saved, 0, sizeof(saved));
+    if (SMR_BA(m, regs, 5) < 0
+        || SMR_DW(m, &saved.voice0_accu) < 0
+        || SMR_DW(m, &saved.voice1_accu) < 0
+        || SMR_B(m, &sign0) < 0
+        || SMR_B(m, &sign1) < 0
+        || SMR_B(m, &saved.noise_shift_register) < 0
+        || SMR_B(m, &saved.noise_output) < 0
+        || SMR_DW(m, &saved.sample_rate) < 0
+        || SMR_DW(m, &saved.sample_length) < 0
+        || SMR_DW(m, &saved.tick_remaining) < 0
+        || SMR_DW(m, &saved.partial_length) < 0
+        || SMR_QW(m, &saved.partial_sum) < 0
+        || SMR_DW(m, &saved.cycle_pending) < 0) {
+        return -1;
+    }
+    if (saved.voice0_accu >= OSCRELOADVAL || saved.voice1_accu >= OSCRELOADVAL
+        || (sign0 != 0 && sign0 != CTRL_VOICE0_ENABLE)
+        || (sign1 != 0 && sign1 != CTRL_VOICE1_ENABLE)
+        || (saved.noise_output != 0 && saved.noise_output != CTRL_VOICE1_ENABLE)
+        || regs[2] > 3 || regs[4] > 3
+        || (saved.sample_rate && (saved.sample_rate > UINT32_MAX / 16
+            || !saved.sample_length || saved.sample_length > 4000000
+            || !saved.tick_remaining || saved.tick_remaining > 8 * saved.sample_rate
+            || saved.partial_length >= saved.sample_length
+            || saved.partial_sum > (uint64_t)19976 * saved.partial_length
+            || saved.cycle_pending >= saved.sample_rate))) {
+        snapshot_set_error(SNAPSHOT_MODULE_INCOMPATIBLE);
+        return -1;
+    }
+    ted_sound_snapshot_legacy(regs);
+    if (saved.sample_rate) {
+        /* Rebuild values derived from registers, then restore running state. */
+        ted_sound_machine_init(NULL, saved.sample_rate, saved.sample_length);
+        snd.voice0_accu = saved.voice0_accu;
+        snd.voice1_accu = saved.voice1_accu;
+        snd.voice0_sign = sign0;
+        snd.voice1_sign = sign1;
+        snd.noise_shift_register = saved.noise_shift_register;
+        snd.noise_output = saved.noise_output;
+        snd.tick_remaining = saved.tick_remaining;
+        snd.partial_length = saved.partial_length;
+        snd.partial_sum = saved.partial_sum;
+        snd.cycle_pending = saved.cycle_pending;
+        snd.voice0_cached_output = snd.volume | (sign0 & snd.voice0_output_enabled);
+        snd.voice1_cached_output = snd.volume | (sign1 & snd.voice1_output_enabled)
+                                  | (snd.noise_output & (snd.noise >> 1));
+        snapshot_loaded = 1;
+        if (current_rate && (current_rate != snd.sample_rate || current_clock != snd.sample_length)) {
+            ted_sound_machine_init(NULL, current_rate, current_clock);
+            snapshot_loaded = 1;
+        }
+    }
+    return 0;
+}
+
 /* ---------------------------------------------------------------------*/
 
 void ted_sound_store(uint16_t addr, uint8_t value)
 {
+    /* The CPU core combines the two writes of an RMW instruction.  Restore
+       the write of the unmodified value on the preceding bus cycle. */
+    if (maincpu_rmw_flag) {
+        maincpu_clk--;
+        sound_store((uint16_t)(ted_sound_chip_offset | addr), last_sound_read, 0);
+        maincpu_clk++;
+    }
     sound_store((uint16_t)(ted_sound_chip_offset | addr), value, 0);
 }
 
@@ -575,6 +749,7 @@ uint8_t ted_sound_read(uint16_t addr)
         value &= 3;
     }
 
+    last_sound_read = value;
     return value;
 }
 

@@ -27,12 +27,17 @@
 
 #include "vice.h"
 
+#include "dma.h"
+#include "maincpu.h"
 #include "machine.h"
 #include "plus4.h"
 #include "resources.h"
 #include "ted-timing.h"
 #include "ted.h"
 #include "tedtypes.h"
+
+static CLOCK old_maincpu_clk = 0;
+static CLOCK old_cycle = 0;
 
 /* Number of cycles per line.  */
 #define TED_PAL_CYCLES_PER_LINE     PLUS4_PAL_CYCLES_PER_LINE
@@ -133,4 +138,102 @@ void ted_timing_set(machine_timing_t *machine_timing, int border_mode)
             ted.vsync_line = TED_PAL_VSYNC_LINE;
             break;
     }
+}
+
+void ted_delay_oldclk(CLOCK num)
+{
+    old_maincpu_clk += num;
+    old_cycle += num;
+}
+
+/* A counter write changes the horizontal phase without running the CPU. */
+void ted_delay_resync(void)
+{
+    old_maincpu_clk = maincpu_clk;
+    old_cycle = TED_RASTER_CYCLE(maincpu_clk);
+}
+
+void ted_delay_clk(void)
+{
+    CLOCK diff;
+
+    if (maincpu_clk == old_maincpu_clk) {
+        return;
+    }
+
+    if (ted.fastmode == 0) {
+        diff = maincpu_clk - old_maincpu_clk - ((old_cycle & 1) ^ 1);
+        dma_maincpu_steal_cycles(maincpu_clk, diff, 0);
+    } else {
+fastloop:
+        diff = maincpu_clk - old_maincpu_clk;
+
+        if (ted.character_fetch_on) {
+            /* Fast mode, with character fetches,
+               every even cycle is stolen from cycle 4 till cycle 100
+               this covers 5 RAM refresh, 40 graphic fetch, and 4 idle fetch
+               before the window.
+            */
+            if ((old_cycle < 101) && (old_cycle + diff >= 4)) {
+                CLOCK max = 49;
+                if (old_cycle > 3) {
+                    max = (101 - old_cycle) / 2;
+                    diff -= !(old_cycle & 1);
+                } else {
+                    diff -= 3 - old_cycle;
+                }
+                if (diff > max) {
+                    diff = max;
+                }
+                dma_maincpu_steal_cycles(maincpu_clk, diff, 0);
+            } else if (old_cycle + diff >= 118) {
+                /* Instruction crosses into next line, and potentially
+                   crossing into area where clocking changes.
+                   Call draw alarm, and check if clocking changed.
+                */
+                /* Resume at the last fast clock before the next line's
+                   single-clock window.  The remaining CPU clocks must not
+                   include the fast clocks already consumed. */
+                old_maincpu_clk += 117 - old_cycle;
+                old_cycle = 3;
+                ted_raster_draw_alarm_handler(0, NULL);
+                goto fastloop;
+            }
+        } else {
+            /* Fast mode, no character fetches,
+               we only have to deal with 5 RAM refresh cycles
+               the following cycles are stolen 92,94,96,98,100.
+            */
+            if ((old_cycle < 101) && (old_cycle + diff >= 92)) {
+                CLOCK max = 5;
+                if (old_cycle > 91) {
+                    max = (101 - old_cycle) / 2;
+                    diff -= !(old_cycle & 1);
+                } else {
+                    diff -= 91 - old_cycle;
+                }
+                if (diff > max) {
+                    diff = max;
+                }
+                dma_maincpu_steal_cycles(maincpu_clk, diff, 0);
+            } else if (old_cycle + diff >= 118) {
+                /* Instruction crosses into next line, and potentially
+                   crossing into area where clocking changes.
+                   Call draw alarm, and check if clocking changed.
+                */
+                /* Resume at the last fast clock before the next line's
+                   single-clock window.  The remaining CPU clocks must not
+                   include the fast clocks already consumed. */
+                old_maincpu_clk += 117 - old_cycle;
+                old_cycle = 3;
+                ted_raster_draw_alarm_handler(0, NULL);
+                goto fastloop;
+            }
+        }
+    }
+
+    old_maincpu_clk = maincpu_clk;
+    old_cycle = TED_RASTER_CYCLE(maincpu_clk) % 114;
+
+    return;
 }

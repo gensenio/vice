@@ -239,14 +239,27 @@ struct ted_s {
        line.  FIXME: Value of 2?...  */
     int memory_fetch_done;
 
+    /* Horizontal-event state.  Clocks use the CPU double-clock unit. */
+    CLOCK counter_clk;
+    CLOCK counter_overflow_until;
+    int counter_increment;
+    /* Enabled by the first attribute fetch, independently of bitmap fetch. */
+    int row_counter_active;
+
+    /* Bitmap bytes fetched before a CPU write, until this line is drawn. */
+    uint8_t bitmap_latched[TED_SCREEN_TEXTCOLS];
+    uint8_t bitmap_data[TED_SCREEN_TEXTCOLS];
+    int bitmap_dirty;
+
     /* Internal memory pointer (VCBASE).  */
     int memptr;
     int memptr_col;
 
     /* Internal memory counter (VC).  */
     int mem_counter;
-    /* For bitmap fetch */
+    /* Character-position reload register ($ff1a/$ff1b). */
     int chr_pos_reload;
+    /* Current bitmap fetch position. */
     int chr_pos_count;
     int chr_pos_inc_enable;
 
@@ -268,6 +281,12 @@ struct ted_s {
     /* Flag: Check for raster.ycounter reset already done on this line?
        (cycle 13) */
     int ycounter_reset_checked;
+
+    /* Row sub-address for deferred foreground rendering. */
+    int draw_ycounter;
+
+    /* Character DMA follows the attribute request on the preceding line. */
+    int matrix_fetch_pending;
 
     /* Flag: Does the currently selected video mode force the overscan
        background color to be black?  (This happens with the hires bitmap and
@@ -359,6 +378,7 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data);
 /* void ted_resize(void); */
 void ted_delay_clk(void);
 void ted_delay_oldclk(CLOCK num);
+void ted_delay_resync(void);
 
 /* Debugging options.  */
 

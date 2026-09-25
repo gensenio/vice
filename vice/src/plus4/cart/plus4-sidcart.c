@@ -45,6 +45,7 @@
 #include "sidcart.h"
 #include "sound.h"
 #include "types.h"
+#include "ted-sound.h"
 #include "uiapi.h"
 
 int sidcartjoy_enabled = 0;
@@ -67,6 +68,31 @@ static int sidcart_sound_machine_init(sound_t *psid, int speed, int cycles_per_s
     }
 }
 
+/* The first sound slot supplies sample timing even when its cartridge is
+   disabled.  Use the native TED clock in that case. */
+static int sidcart_sound_cycle_based(void)
+{
+    return !sidcart_enabled() || sid_sound_machine_cycle_based();
+}
+
+#ifdef SOUND_SYSTEM_FLOAT
+static int sidcart_sound_calculate_samples(sound_t **psid, float *pbuf, int nr, int scc, CLOCK *delta_t)
+{
+    if (!sidcart_enabled()) {
+        return ted_sound_calculate_samples(psid, pbuf, nr, scc, delta_t);
+    }
+    return sid_sound_machine_calculate_samples(psid, pbuf, nr, scc, delta_t);
+}
+#else
+static int sidcart_sound_calculate_samples(sound_t **psid, int16_t *pbuf, int nr, int soc, int scc, CLOCK *delta_t)
+{
+    if (!sidcart_enabled()) {
+        return ted_sound_calculate_samples(psid, pbuf, nr, soc, scc, delta_t);
+    }
+    return sid_sound_machine_calculate_samples(psid, pbuf, nr, soc, scc, delta_t);
+}
+#endif
+
 #ifdef SOUND_SYSTEM_FLOAT
 /* stereo mixing placement of the PLUS4 SID cartridge sound */
 static sound_chip_mixing_spec_t sidcart_sound_mixing_spec[SOUND_CHIP_CHANNELS_MAX] = {
@@ -82,11 +108,11 @@ static sound_chip_t sidcart_sound_chip = {
     sid_sound_machine_open,              /* sound chip open function */
     sidcart_sound_machine_init,          /* sound chip init function */
     sid_sound_machine_close,             /* sound chip close function */
-    sid_sound_machine_calculate_samples, /* sound chip calculate samples function */
+    sidcart_sound_calculate_samples,     /* sound chip calculate samples function */
     sid_sound_machine_store,             /* sound chip store function */
     sid_sound_machine_read,              /* sound chip read function */
     sid_sound_machine_reset,             /* sound chip reset function */
-    sid_sound_machine_cycle_based,       /* sound chip 'is_cycle_based()' function, RESID engine is cycle based, all other engines are NOT */
+    sidcart_sound_cycle_based,           /* native TED timing, or the enabled SID engine */
     sid_sound_machine_channels,          /* sound chip 'get_amount_of_channels()' function, sound chip has 1 channel */
 #ifdef SOUND_SYSTEM_FLOAT
     sidcart_sound_mixing_spec,           /* stereo mixing placement specs */

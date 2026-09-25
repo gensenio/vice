@@ -32,11 +32,22 @@
 
 #include "sound.h"
 
+struct snapshot_module_s;
+int ted_sound_snapshot_write(struct snapshot_module_s *m);
+int ted_sound_snapshot_read(struct snapshot_module_s *m);
+void ted_sound_snapshot_legacy(const uint8_t *regs);
+
 void ted_sound_store(uint16_t addr, uint8_t value);
 uint8_t ted_sound_read(uint16_t addr);
 
 void ted_sound_reset(sound_t *psid, CLOCK cpu_clk);
 
 void ted_sound_chip_init(void);
+
+#ifdef SOUND_SYSTEM_FLOAT
+int ted_sound_calculate_samples(sound_t **psid, float *pbuf, int nr, int scc, CLOCK *delta_t);
+#else
+int ted_sound_calculate_samples(sound_t **psid, int16_t *pbuf, int nr, int soc, int scc, CLOCK *delta_t);
+#endif
 
 #endif

@@ -93,6 +93,8 @@ libplus4_a_SOURCES = \
 	ted-color.h \
 	ted-draw.c \
 	ted-draw.h \
+	ted-counter.c \
+	ted-counter.h \
 	ted-fetch.c \
 	ted-fetch.h \
 	ted-irq.c \

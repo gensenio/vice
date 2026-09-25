@@ -30,6 +30,7 @@
 
 #include "types.h"
 
+void ted_fetch_store(uint16_t addr, uint8_t old_value, unsigned int ram_mask);
 void ted_fetch_init(void);
 void ted_fetch_alarm_handler(CLOCK offset, void *data);
 void ted_fetch_matrix(int offs, int num);
