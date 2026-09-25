@@ -79,107 +79,38 @@ static int unused_bits_in_registers[64] =
 
 inline static void ted_local_store_vbank(uint16_t addr, uint8_t value)
 {
-    unsigned int f;
-    /* The access before this write, before the single clock stretch.
+    /* Serve TED events up to this write like any other CPU write, so that
+       the DMA halt is decided on the bus slot of the write, after the
+       single clock stretch.
        WARNING: Assumes `maincpu_rmw_flag' is 0 or 1.  */
-    CLOCK prev_clk = maincpu_clk - maincpu_rmw_flag - 1;
-    int after_write = (prev_clk == ted.cpu_write_end_clk);
-
-    ted_delay_clk();
-
-    do {
-        CLOCK mclk;
-
-        /* WARNING: Assumes `maincpu_rmw_flag' is 0 or 1.  */
-        mclk = maincpu_clk - maincpu_rmw_flag - 1;
-        f = 0;
-
-        if (mclk >= ted.draw_clk) {
-            ted_raster_draw_alarm_handler(0, NULL);
-            f = 1;
-        }
-
-        if (ted_dma_halts_cpu(prev_clk, after_write)) {
-            ted_fetch_alarm_handler(maincpu_clk - ted.fetch_clk, NULL);
-            f = 1;
-        }
-
-        ted_delay_clk();
-    } while (f);
+    ted_handle_pending_alarms(maincpu_rmw_flag + 1);
 
     ted_fetch_store(addr, mem_ram[addr], 0xffff);
     mem_ram[addr] = value;
-    ted.cpu_write_end_clk = maincpu_clk;
 }
 
 inline static void ted_local_store_vbank_32k(uint16_t addr, uint8_t value)
 {
-    unsigned int f;
-    /* The access before this write, before the single clock stretch.
+    /* Serve TED events up to this write like any other CPU write, so that
+       the DMA halt is decided on the bus slot of the write, after the
+       single clock stretch.
        WARNING: Assumes `maincpu_rmw_flag' is 0 or 1.  */
-    CLOCK prev_clk = maincpu_clk - maincpu_rmw_flag - 1;
-    int after_write = (prev_clk == ted.cpu_write_end_clk);
-
-    ted_delay_clk();
-
-    do {
-        CLOCK mclk;
-
-        /* WARNING: Assumes `maincpu_rmw_flag' is 0 or 1.  */
-        mclk = maincpu_clk - maincpu_rmw_flag - 1;
-        f = 0;
-
-        if (mclk >= ted.draw_clk) {
-            ted_raster_draw_alarm_handler(0, NULL);
-            f = 1;
-        }
-
-        if (ted_dma_halts_cpu(prev_clk, after_write)) {
-            ted_fetch_alarm_handler(maincpu_clk - ted.fetch_clk, NULL);
-            f = 1;
-        }
-
-        ted_delay_clk();
-    } while (f);
+    ted_handle_pending_alarms(maincpu_rmw_flag + 1);
 
     ted_fetch_store(addr & 0x7fff, mem_ram[addr & 0x7fff], 0x7fff);
     mem_ram[addr & 0x7fff] = value;
-    ted.cpu_write_end_clk = maincpu_clk;
 }
 
 inline static void ted_local_store_vbank_16k(uint16_t addr, uint8_t value)
 {
-    unsigned int f;
-    /* The access before this write, before the single clock stretch.
+    /* Serve TED events up to this write like any other CPU write, so that
+       the DMA halt is decided on the bus slot of the write, after the
+       single clock stretch.
        WARNING: Assumes `maincpu_rmw_flag' is 0 or 1.  */
-    CLOCK prev_clk = maincpu_clk - maincpu_rmw_flag - 1;
-    int after_write = (prev_clk == ted.cpu_write_end_clk);
-
-    ted_delay_clk();
-
-    do {
-        CLOCK mclk;
-
-        /* WARNING: Assumes `maincpu_rmw_flag' is 0 or 1.  */
-        mclk = maincpu_clk - maincpu_rmw_flag - 1;
-        f = 0;
-
-        if (mclk >= ted.draw_clk) {
-            ted_raster_draw_alarm_handler(0, NULL);
-            f = 1;
-        }
-
-        if (ted_dma_halts_cpu(prev_clk, after_write)) {
-            ted_fetch_alarm_handler(maincpu_clk - ted.fetch_clk, NULL);
-            f = 1;
-        }
-
-        ted_delay_clk();
-    } while (f);
+    ted_handle_pending_alarms(maincpu_rmw_flag + 1);
 
     ted_fetch_store(addr & 0x3fff, mem_ram[addr & 0x3fff], 0x3fff);
     mem_ram[addr & 0x3fff] = value;
-    ted.cpu_write_end_clk = maincpu_clk;
 }
 
 /* Encapsulate inlined function for other modules */
