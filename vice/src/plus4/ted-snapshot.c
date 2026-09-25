@@ -105,7 +105,7 @@ void ted_snapshot_prepare(void)
 
 static char snap_module_name[] = "TED";
 #define SNAP_MAJOR 1
-#define SNAP_MINOR 10
+#define SNAP_MINOR 11
 
 int ted_snapshot_write_module(snapshot_t *s)
 {
@@ -207,6 +207,11 @@ int ted_snapshot_write_module(snapshot_t *s)
     if (SMW_B(m, (uint8_t)ted.draw_ycounter) < 0
         || SMW_B(m, (uint8_t)ted.raster.ycounter) < 0
         || SMW_B(m, (uint8_t)ted.matrix_fetch_pending) < 0) {
+        goto fail;
+    }
+
+    if (SMW_W(m, (uint16_t)ted.dma_line) < 0
+        || SMW_B(m, (uint8_t)ted.chr_pos_latch) < 0) {
         goto fail;
     }
 
@@ -410,7 +415,8 @@ int ted_snapshot_read_module(snapshot_t *s)
         ted.counter_clk = maincpu_clk;
         ted.counter_overflow_until = 0;
         ted.counter_increment = ted.character_fetch_on
-                               && RasterCycle >= 8 && RasterCycle < 89;
+                               && RasterCycle >= 8
+                               && RasterCycle < TED_POSITION_LATCH_CYCLE;
         ted.row_counter_active = !ted.idle_state;
         ted.memptr_col = ted.mem_counter;
     }
@@ -444,6 +450,15 @@ int ted_snapshot_read_module(snapshot_t *s)
             || SMR_B_INT(m, &ted.matrix_fetch_pending) < 0
             || ted.draw_ycounter > 7 || ted.raster.ycounter > 7
             || ted.matrix_fetch_pending > 1) {
+            goto fail;
+        }
+    }
+    ted.dma_line = ted.ted_raster_counter;
+    ted.chr_pos_latch = ted.raster.ycounter == 7;
+    if (snapshot_version_is_bigger(major_version, minor_version, 1, 10)) {
+        if (SMR_W_UINT(m, &ted.dma_line) < 0
+            || SMR_B_INT(m, &ted.chr_pos_latch) < 0
+            || ted.dma_line > 511 || ted.chr_pos_latch > 1) {
             goto fail;
         }
     }

@@ -95,12 +95,7 @@ inline static void ted_local_store_vbank(uint16_t addr, uint8_t value)
             f = 1;
         }
 
-        if (mclk >= ted.fetch_clk) {
-            /* If the fetch starts here, the sprite fetch routine should
-               get the new value, not the old one.  */
-            if (mclk == ted.fetch_clk) {
-                mem_ram[addr] = value;
-            }
+        if (mclk >= ted.fetch_clk && mclk - ted.fetch_clk >= TED_DMA_BUS_DELAY) {
             ted_fetch_alarm_handler(maincpu_clk - ted.fetch_clk, NULL);
             f = 1;
             /* WARNING: Assumes `maincpu_rmw_flag' is 0 or 1.  */
@@ -132,12 +127,7 @@ inline static void ted_local_store_vbank_32k(uint16_t addr, uint8_t value)
             f = 1;
         }
 
-        if (mclk >= ted.fetch_clk) {
-            /* If the fetch starts here, the sprite fetch routine should
-               get the new value, not the old one.  */
-            if (mclk == ted.fetch_clk) {
-                mem_ram[addr & 0x7fff] = value;
-            }
+        if (mclk >= ted.fetch_clk && mclk - ted.fetch_clk >= TED_DMA_BUS_DELAY) {
             ted_fetch_alarm_handler(maincpu_clk - ted.fetch_clk, NULL);
             f = 1;
             /* WARNING: Assumes `maincpu_rmw_flag' is 0 or 1.  */
@@ -169,12 +159,7 @@ inline static void ted_local_store_vbank_16k(uint16_t addr, uint8_t value)
             f = 1;
         }
 
-        if (mclk >= ted.fetch_clk) {
-            /* If the fetch starts here, the sprite fetch routine should
-               get the new value, not the old one.  */
-            if (mclk == ted.fetch_clk) {
-                mem_ram[addr & 0x3fff] = value;
-            }
+        if (mclk >= ted.fetch_clk && mclk - ted.fetch_clk >= TED_DMA_BUS_DELAY) {
             ted_fetch_alarm_handler(maincpu_clk - ted.fetch_clk, NULL);
             f = 1;
             /* WARNING: Assumes `maincpu_rmw_flag' is 0 or 1.  */
@@ -295,7 +280,7 @@ inline static void ted06_store(const uint8_t value)
 
     /* This is the funniest part... handle bad line tricks.  */
 
-    if ((line == ted.first_dma_line) && (value & 0x10) != 0) {
+    if ((ted.dma_line == ted.first_dma_line) && (value & 0x10) != 0) {
         ted.allow_bad_lines = 1;
         /* DEN can enable the display after the start-of-frame check.  The
            CPU clock must follow the display enable latch on this line too. */
@@ -305,9 +290,9 @@ inline static void ted06_store(const uint8_t value)
     }
 
     if ((ted.raster.ysmooth != (value & 7))
-        && (line >= ted.first_dma_line)
-        && (line <= ted.last_dma_line)) {
-        ted_badline_check_state(value, cycle, line);
+        && (ted.dma_line >= ted.first_dma_line)
+        && (ted.dma_line <= ted.last_dma_line)) {
+        ted_badline_check_state(value, cycle, ted.dma_line);
     }
 
     ted.raster.ysmooth = value & 0x7;
@@ -708,18 +693,19 @@ inline static void ted1c1d_store(uint16_t addr, uint8_t value)
     }
 
 /*    log_debug(LOG_DEFAULT, "Raster change old %03x, new %03x",ted.ted_raster_counter, new_raster);*/
-    if ((new_raster >= ted.first_dma_line) &&
-        (new_raster <= ted.last_dma_line)) {
-        ted.fetch_clk = ted.last_emulate_line_clk + TED_FETCH_CYCLE + ted.cycles_per_line;
-        alarm_set(ted.raster_fetch_alarm, ted.fetch_clk);
-    } else {
-        if (new_raster >= ted.screen_height) {
+    /* The current DMA request uses the latched scanline, not this writable
+       counter.  In particular, a write before the fetch must not skip it. */
+    if (ted.fetch_clk != ted.last_emulate_line_clk + TED_FETCH_CYCLE
+        || ted.memory_fetch_done) {
+        if ((new_raster >= ted.first_dma_line) &&
+            (new_raster <= ted.last_dma_line)) {
+            diff = 1;
+        } else if (new_raster >= ted.screen_height) {
             diff = 512 - new_raster;
         } else {
             diff = ted.screen_height - new_raster;
         }
         ted.fetch_clk = ted.last_emulate_line_clk + TED_FETCH_CYCLE + diff * ted.cycles_per_line;
-
         alarm_set(ted.raster_fetch_alarm, ted.fetch_clk);
     }
 

@@ -1,5 +1,5 @@
 /* Regression for the TED blink counter ($ff1f bits 3-6).  It advances on
-   line 205 at dot 336 (cycle 100); the end-of-line handler applies the
+   line 205 at cycle 104 (FPGATED); the end-of-line handler applies the
    increment, so reads and writes later on that line must account for it.
    Exercise the production register handlers. */
 #include <assert.h>
@@ -46,9 +46,9 @@ int main(void)
     ted.screen_height = 312;
 
     ted.cursor_phase = 0x03;
-    at(205, 99);
+    at(205, 103);
     assert(count() == 3);
-    at(205, 100);
+    at(205, 104);
     assert(count() == 4);
     at(205, 113);
     assert(count() == 4);
@@ -76,7 +76,7 @@ int main(void)
     /* Wrapping from 15 toggles the flash state; writing 15 after the
        wrap does not toggle it back. */
     ted.cursor_phase = 0x0f;
-    at(205, 100);
+    at(205, 104);
     assert(count() == 0);
     foreground.count = 0;
     ted1f_store(15 << 3);

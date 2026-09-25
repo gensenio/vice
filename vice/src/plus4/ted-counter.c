@@ -31,7 +31,10 @@
 /* Counter events are expressed in the existing raster coordinate system:
    dot zero is cycle 16.  The preliminary TED event table locates position
    initialization at dot 424, increments at 432..288 and the latch at 290.
-   One VICE clock spans four dots. */
+   One VICE clock spans four dots.  FPGATED opens the latch window at 288
+   and latches at the end of that single clock (296, cycle 90); the bitmap
+   position is latched on the row after the one that was 6 when the line
+   began (`CharPosLatch'), as YapeSDL's `charPosLatchFlag' also does.  */
 
 void ted_counter_update(CLOCK clk)
 {
@@ -54,12 +57,12 @@ void ted_counter_update(CLOCK clk)
             ted.counter_clk++;
             continue;
         }
-        if (cycle == 89) {
+        if (cycle == TED_POSITION_LATCH_CYCLE) {
             if (ted.character_fetch_on) {
                 if (ted.raster.ycounter == 6) {
                     ted.memptr_col = ted.mem_counter;
                 }
-                if (ted.raster.ycounter == 7 && !ted.idle_state) {
+                if (ted.chr_pos_latch && !ted.idle_state) {
                     ted.chr_pos_reload = ted.chr_pos_count;
                 }
             }
@@ -73,9 +76,11 @@ void ted_counter_update(CLOCK clk)
            clock.  During horizontal overflow, cycle 8 is an ordinary clock. */
         if (cycle < 8 && count > 8 - cycle) {
             count = 8 - cycle;
-        } else if (cycle >= 8 && cycle < 89 && count > 89 - cycle) {
-            count = 89 - cycle;
-        } else if (cycle > 89 && cycle < 114 && count > 114 - cycle) {
+        } else if (cycle >= 8 && cycle < TED_POSITION_LATCH_CYCLE
+                   && count > TED_POSITION_LATCH_CYCLE - cycle) {
+            count = TED_POSITION_LATCH_CYCLE - cycle;
+        } else if (cycle > TED_POSITION_LATCH_CYCLE && cycle < 114
+                   && count > 114 - cycle) {
             count = 114 - cycle;
         }
         if (ted.counter_increment) {

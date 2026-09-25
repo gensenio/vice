@@ -75,23 +75,24 @@ static void counter_update_reference(CLOCK clk)
             ted.chr_pos_count = ted.memptr;
             ted.counter_increment = ted.character_fetch_on;
         }
+        /* The latch ends the increments (last one at cycle 88). */
+        if (cycle == TED_POSITION_LATCH_CYCLE) {
+            if (ted.character_fetch_on) {
+                if (ted.raster.ycounter == 6) {
+                    ted.memptr_col = ted.mem_counter;
+                }
+                if (ted.chr_pos_latch && !ted.idle_state) {
+                    ted.chr_pos_reload = ted.chr_pos_count;
+                }
+            }
+            ted.counter_increment = 0;
+        }
         if (!(cycle & 1) && ted.counter_increment
             && (cycle != 8 || ted.counter_clk < ted.counter_overflow_until)) {
             ted.mem_counter = (ted.mem_counter + 1) & 0x3ff;
             if (!ted.idle_state) {
                 ted.chr_pos_count = (ted.chr_pos_count + 1) & 0x3ff;
             }
-        }
-        if (cycle == 89) {
-            if (ted.character_fetch_on) {
-                if (ted.raster.ycounter == 6) {
-                    ted.memptr_col = ted.mem_counter;
-                }
-                if (ted.raster.ycounter == 7 && !ted.idle_state) {
-                    ted.chr_pos_reload = ted.chr_pos_count;
-                }
-            }
-            ted.counter_increment = 0;
         }
     }
 }
@@ -132,6 +133,7 @@ static void test_equivalence(void)
         ted.character_fetch_on = next_random() & 1;
         ted.idle_state = next_random() & 1;
         ted.raster.ycounter = next_random() & 7;
+        ted.chr_pos_latch = next_random() & 1;
         ted.mem_counter = next_random() & 0x3ff;
         ted.memptr_col = next_random() & 0x3ff;
         ted.memptr = next_random() & 0x3ff;
@@ -167,6 +169,8 @@ int main(void)
     assert(ted.mem_counter == 96 && ted.chr_pos_count == 132);
     assert(ted.memptr_col == 56);
     advance(1);
+    assert(ted.memptr_col == 56); /* latched at cycle 90 (FPGATED) */
+    advance(1);
     assert(ted.memptr_col == 96);
     assert(ted.chr_pos_reload == 92);
     advance(24);
@@ -174,11 +178,27 @@ int main(void)
 
     setup();
     ted.raster.ycounter = 7;
+    ted.chr_pos_latch = 1;
     ted.chr_pos_reload = 1000;
-    advance(89);
+    advance(90);
     assert(ted.chr_pos_count == 16);
     assert(ted.chr_pos_reload == 16);
     assert(ted.memptr == 1000); /* current row is not the next-row reload */
+
+    /* The bitmap position latch follows the row at the start of the line
+       (FPGATED CharPosLatch), not a $ff1f write during it. */
+    setup();
+    ted.raster.ycounter = 0; /* written after the line began with row 6 */
+    ted.chr_pos_latch = 1;
+    ted.chr_pos_reload = 1000;
+    advance(90);
+    assert(ted.chr_pos_reload == 16);
+    setup();
+    ted.raster.ycounter = 7; /* written after the line began with row 5 */
+    ted.chr_pos_latch = 0;
+    ted.chr_pos_reload = 1000;
+    advance(90);
+    assert(ted.chr_pos_reload == 1000);
 
     /* A forward jump skips increments; it must not count skipped columns. */
     setup();
@@ -189,7 +209,7 @@ int main(void)
     assert(ted_counter_read() == 0x82); /* inverted write, preserved phase */
     assert(ted.draw_clk - maincpu_clk == 33);
     assert(resyncs == 1);
-    advance(8);
+    advance(9);
     assert(ted.mem_counter == 24 && ted.memptr_col == 24);
     /* Jumping back after stop cannot silently restart the incrementer. */
     ted_counter_store(0xd1);
@@ -230,7 +250,7 @@ int main(void)
     /* Bitmap idle does not prevent the matrix position from advancing. */
     setup();
     ted.idle_state = 1;
-    advance(89);
+    advance(90);
     assert(ted.mem_counter == 40 && ted.chr_pos_count == 0);
 
     /* Values above dot 455 must overflow at 512, not wrap at 456. */

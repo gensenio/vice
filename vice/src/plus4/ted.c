@@ -113,7 +113,11 @@ inline void ted_handle_pending_alarms(CLOCK num_write_cycles)
                 ted_raster_draw_alarm_handler(maincpu_clk - ted.draw_clk, NULL);
                 f = 1;
             }
-            if (maincpu_clk > ted.fetch_clk + 1) {
+            /* RDY stops reads, not writes.  The CPU core now calls us for
+               both RMW writes; do not mistake the first write for a read
+               and halt between them during TED's BA warning interval. */
+            if (maincpu_clk >= ted.fetch_clk
+                && maincpu_clk - ted.fetch_clk >= TED_DMA_BUS_DELAY) {
                 ted_fetch_alarm_handler(0, NULL);
                 f = 1;
             }
@@ -315,6 +319,8 @@ void ted_reset(void)
     /* FIXME this should be in powerup */
     ted.tv_current_line = 0;
     ted.ted_raster_counter = ted.vsync_line;
+    ted.dma_line = ted.ted_raster_counter;
+    ted.chr_pos_latch = 0;
 
 /*    ted_set_geometry();*/
 
@@ -666,14 +672,14 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
         ted.bitmap_dirty = 0;
     }
 
-    if (ted.ted_raster_counter == ted.last_dma_line) {
+    if (ted.dma_line == ted.last_dma_line) {
         ted.idle_state = 1;
     }
 
     ted.matrix_fetch_pending = ted.allow_bad_lines
-        && ted.ted_raster_counter >= ted.first_dma_line
-        && ted.ted_raster_counter < ted.last_dma_line
-        && (ted.ted_raster_counter & 7) == (unsigned int)ted.raster.ysmooth;
+        && ted.dma_line >= ted.first_dma_line
+        && ted.dma_line < ted.last_dma_line
+        && (ted.dma_line & 7) == (unsigned int)ted.raster.ysmooth;
 
     /* The blink counter advances on its line, not at vertical sync, so
        raster-counter writes that skip or repeat the line change its rate.
@@ -682,6 +688,10 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
         ted.cursor_phase = (ted.cursor_phase + 1) & 0x1f;
         ted.cursor_visible = ted.cursor_phase & 0x10;
     }
+
+    /* Sampled before the row counter advances; used by the position latch
+       of the next line.  */
+    ted.chr_pos_latch = ted.raster.ycounter == 6;
 
     ted.tv_current_line++;
     ted.ted_raster_counter++;
@@ -705,6 +715,7 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
     if (ted.ted_raster_counter == 512) {
         ted.ted_raster_counter = 0;
     }
+    ted.dma_line = ted.ted_raster_counter;
 
     if (ted.ted_raster_counter == 0xcc) {
         ted.row_counter_active = 0;

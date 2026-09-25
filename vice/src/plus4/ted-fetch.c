@@ -81,7 +81,7 @@ void ted_fetch_matrix(int offs, int num)
     int c;
 
     /* Matrix fetches are done during Phi2, the fabulous "bad lines" */
-    p = (ted.ted_raster_counter & 7) == (unsigned int)ted.raster.ysmooth
+    p = (ted.dma_line & 7) == (unsigned int)ted.raster.ysmooth
         ? ted.color_ptr : ted.screen_ptr;
 
     start_char = (ted.memptr_col + offs) & 0x3ff;
@@ -130,9 +130,9 @@ inline static int do_matrix_fetch(CLOCK sub)
 
         if (ted.matrix_fetch_pending
             && ted.allow_bad_lines
-            && ted.ted_raster_counter > ted.first_dma_line
+            && ted.dma_line > ted.first_dma_line
             /* && ted.bad_line */
-            && ted.ted_raster_counter <= ted.last_dma_line) {
+            && ted.dma_line <= ted.last_dma_line) {
             ted_fetch_matrix(0, TED_SCREEN_TEXTCOLS);
 
             raster->draw_idle_state = 0;
@@ -147,10 +147,10 @@ inline static int do_matrix_fetch(CLOCK sub)
             reval = 1;
         }
 
-        if ((ted.ted_raster_counter & 7) == (unsigned int)raster->ysmooth
+        if ((ted.dma_line & 7) == (unsigned int)raster->ysmooth
             && ted.allow_bad_lines
-            && ted.ted_raster_counter >= ted.first_dma_line
-            && ted.ted_raster_counter < ted.last_dma_line) {
+            && ted.dma_line >= ted.first_dma_line
+            && ted.dma_line < ted.last_dma_line) {
             ted.row_counter_active = 1;
             ted_fetch_color(0, TED_SCREEN_TEXTCOLS);
 /*

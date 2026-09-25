@@ -109,8 +109,11 @@ typedef enum ted_video_mode_s ted_video_mode_t;
 /* Cycle # at which the TED takes the bus in a bad line (BA goes low).  */
 #define TED_FETCH_CYCLE             4
 
+/* Three single clocks of BA warning before TED owns the memory bus. */
+#define TED_DMA_BUS_DELAY           6
+
 /* Cycle # at which the CPU runs again after the DMA of a bad line.  */
-#define TED_DMA_END_CYCLE           (TED_FETCH_CYCLE + (TED_SCREEN_TEXTCOLS + 3) * 2)
+#define TED_DMA_END_CYCLE           (TED_FETCH_CYCLE + TED_DMA_BUS_DELAY + TED_SCREEN_TEXTCOLS * 2)
 
 /* Attribute and character bytes are fetched for character i at cycle
    TED_DMA_SLOT_CYCLE + 2 * i.  */
@@ -125,14 +128,20 @@ typedef enum ted_video_mode_s ted_video_mode_t;
 #define TED_38COL_STOP_CYCLE        94
 #define TED_40COL_STOP_CYCLE        96
 
+/* Cycle at which the DMA and bitmap positions are latched for the next
+   character row (see ted-counter.c).  */
+#define TED_POSITION_LATCH_CYCLE    90
+
 /* Cycle at which the incremented raster line is latched for the vertical
    window tests.  */
 #define TED_LINE_LATCH_CYCLE        112
 
 /* The blink counter ($ff1f bits 3-6) is incremented once per frame on this
-   line, at dot 336 ("Increment Blink" in the data sheet).  */
+   line.  The data sheet lists "Increment Blink" at dot 336; FPGATED, whose
+   horizontal counter is 0 at the start of the 40 column window (cycle 16),
+   applies it at count 352, two single clocks later.  */
 #define TED_BLINK_LINE              205
-#define TED_BLINK_CYCLE             100
+#define TED_BLINK_CYCLE             104
 
 /* Delay for the raster line interrupt.  This is not due to the TED, since
    it triggers the IRQ line at the beginning of the line, but to the 7501
@@ -261,6 +270,8 @@ struct ted_s {
     /* Which display line is drawn? */
     unsigned int tv_current_line;
     unsigned int ted_raster_counter;
+    /* Scanline latched for DMA; $ff1c/$ff1d only change the live counter. */
+    unsigned int dma_line;
 
     /* This flag is set if a memory fetch has already happened on the current
        line.  FIXME: Value of 2?...  */
@@ -288,6 +299,10 @@ struct ted_s {
     int chr_pos_reload;
     /* Current bitmap fetch position. */
     int chr_pos_count;
+
+    /* The row counter was 6 when the current line began: the bitmap
+       position is latched at TED_POSITION_LATCH_CYCLE.  */
+    int chr_pos_latch;
     int chr_pos_inc_enable;
 
     /* Value to add to `mem_counter' after the graphics has been painted.  */
