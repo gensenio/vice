@@ -8,12 +8,8 @@
 
 ted_t ted;
 CLOCK maincpu_clk;
-
-void dma_maincpu_steal_cycles(CLOCK start, CLOCK count, CLOCK sub)
-{
-    assert(count <= 16);
-    maincpu_clk += count;
-}
+static interrupt_cpu_status_t int_status;
+interrupt_cpu_status_t *maincpu_int_status = &int_status;
 
 void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
 {
@@ -45,12 +41,15 @@ int main(void)
             for (phase = 0; phase < 114; phase++) {
                 for (count = 0; count <= 8; count++) {
                     memset(&ted, 0, sizeof(ted));
+                    memset(&int_status, 0, sizeof(int_status));
                     ted.fastmode = fast;
                     ted.character_fetch_on = fetch;
                     maincpu_clk = phase;
                     ted_delay_resync();
                     expected = clock_slots(maincpu_clk, count, fast, fetch);
                     maincpu_clk += count;
+                    int_status.irq_clk = maincpu_clk;
+                    int_status.nmi_clk = maincpu_clk;
                     ted_delay_clk();
                     if (maincpu_clk != expected) {
                         fprintf(stderr, "fast %d fetch %d phase %u count %u: %llu != %llu\n",
@@ -58,6 +57,13 @@ int main(void)
                                 (unsigned long long)maincpu_clk, (unsigned long long)expected);
                         return 1;
                     }
+                    /* The CPU is slowed, not halted: pending interrupts
+                       follow the stretched clock, and no DMA is recorded
+                       that would delay an interrupt raised before it. */
+                    assert(int_status.irq_clk == expected);
+                    assert(int_status.nmi_clk == int_status.irq_clk);
+                    assert(int_status.last_stolen_cycles_clk == 0);
+                    assert(int_status.num_dma_per_opcode == 0);
                 }
             }
         }
