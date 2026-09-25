@@ -1,4 +1,7 @@
-/* Consecutive CPU writes remain possible during TED's BA warning. */
+/* TED's BA warning: the read in the single clock in which BA falls
+   completes, RDY stops the CPU at its next read, but writes that follow
+   another write (RMW, stack pushes) complete during the three single clocks
+   before TED owns the bus. */
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -87,15 +90,16 @@ int main(void)
     unsigned int i;
 
     setup();
-    /* The core issues the old-value write, followed by the final write.
-       Each has its own call; maincpu_rmw_flag is no longer set by the core. */
-    maincpu_clk += 2;
+    /* An RMW whose last read precedes BA: the core issues the old-value
+       write, followed by the final write, each with its own call.  Both
+       complete during the BA warning; the next read waits for the DMA. */
+    maincpu_clk += 1;
     ted_handle_pending_alarms(1);
-    assert(maincpu_clk == 7);
+    assert(maincpu_clk == 5);
     assert(fetches == 0);
     maincpu_clk++;
     ted_handle_pending_alarms(1);
-    assert(maincpu_clk == 9);
+    assert(maincpu_clk == 7);
     assert(fetches == 0);
 
     maincpu_clk++;
@@ -109,20 +113,40 @@ int main(void)
     assert(maincpu_clk == 5);
     assert(fetches == 1);
 
+    /* The read in the single clock in which BA falls completes, so does a
+       store after it... */
+    setup();
+    maincpu_clk += 2;
+    ted_handle_pending_alarms(1);
+    assert(fetches == 0);
+
+    /* ...but a later read waits: the write follows the DMA (Return to
+       Promised Land's STA $FF07 after a forced bad line). */
+    setup();
+    maincpu_clk += 3;
+    ted_handle_pending_alarms(1);
+    assert(fetches == 1);
+
     for (i = 0; i < sizeof(stores) / sizeof(stores[0]); i++) {
         setup();
-        maincpu_clk += 2;
+        maincpu_clk += 1;
         stores[i](0x1234, 0x40);
-        assert(maincpu_clk == 7);
+        assert(maincpu_clk == 5);
         assert(fetches == 0);
         maincpu_clk++;
         stores[i](0x1234, 0x41);
-        assert(maincpu_clk == 9);
+        assert(maincpu_clk == 7);
         assert(fetches == 0);
         assert(mem_ram[0x1234] == 0x41);
         maincpu_clk++;
         ted_handle_pending_alarms(0);
         assert(fetches == 1);
+
+        setup();
+        maincpu_clk += 4;
+        stores[i](0x1234, 0x42);
+        assert(fetches == 1);
+        assert(mem_ram[0x1234] == 0x42);
     }
 
     /* Resetting the live line after attribute DMA must still copy its
