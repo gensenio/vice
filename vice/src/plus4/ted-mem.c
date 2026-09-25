@@ -386,7 +386,15 @@ inline static void ted07_store(uint8_t value)
     /* Bit 4 (CSEL) selects 38/40 column mode.  */
     check_lateral_border(value, cycle, raster);
 
-    ted.reverse_mode = value & 0x80;
+    /* Bit 7 selects whether bit 7 of the character code reverses the
+       character or addresses 256 characters; it takes effect from the next
+       character fetch, like the character set address it also changes (see
+       `ted_update_memory_ptrs()').  After the character window it applies
+       from the next line; the line must not be drawn with it already.  */
+    if ((value ^ ted.regs[0x07]) & 0x80) {
+        raster_changes_foreground_add_int(raster, TED_RASTER_CHAR(cycle),
+                                          &ted.reverse_mode, value & 0x80);
+    }
 
     old_value = ted.regs[0x07];
 
