@@ -11,6 +11,7 @@
 #include "tedtypes.h"
 #include "ted-timer.h"
 #include "ted-irq.h"
+#include "snapshot.h"
 
 CLOCK maincpu_clk;
 static alarm_context_t context;
@@ -50,6 +51,56 @@ void alarm_unset(alarm_t *a)
         a->pending_idx = -1;
         alarm_context_update_next_pending(ctx);
     }
+}
+/* In-memory snapshot module for the timer state round trip. */
+struct snapshot_module_s {
+    uint8_t data[64];
+    unsigned int size;
+    unsigned int pos;
+};
+int snapshot_module_write_byte(snapshot_module_t *m, uint8_t data)
+{
+    assert(m->size < sizeof(m->data));
+    m->data[m->size++] = data;
+    return 0;
+}
+int snapshot_module_write_word(snapshot_module_t *m, uint16_t data)
+{
+    snapshot_module_write_byte(m, (uint8_t)data);
+    return snapshot_module_write_byte(m, (uint8_t)(data >> 8));
+}
+int snapshot_module_write_dword(snapshot_module_t *m, uint32_t data)
+{
+    snapshot_module_write_word(m, (uint16_t)data);
+    return snapshot_module_write_word(m, (uint16_t)(data >> 16));
+}
+int snapshot_module_read_byte(snapshot_module_t *m, uint8_t *b_return)
+{
+    if (m->pos >= m->size) {
+        return -1;
+    }
+    *b_return = m->data[m->pos++];
+    return 0;
+}
+int snapshot_module_read_word(snapshot_module_t *m, uint16_t *w_return)
+{
+    uint8_t lo, hi;
+    if (snapshot_module_read_byte(m, &lo) < 0
+        || snapshot_module_read_byte(m, &hi) < 0) {
+        return -1;
+    }
+    *w_return = (uint16_t)(lo | (hi << 8));
+    return 0;
+}
+int snapshot_module_read_dword(snapshot_module_t *m, uint32_t *dw_return)
+{
+    uint16_t lo, hi;
+    if (snapshot_module_read_word(m, &lo) < 0
+        || snapshot_module_read_word(m, &hi) < 0) {
+        return -1;
+    }
+    *dw_return = lo | ((uint32_t)hi << 16);
+    return 0;
 }
 static unsigned int count(unsigned int timer)
 {
@@ -141,6 +192,60 @@ int main(void)
         assert(count(i) == 0);
     }
     assert(context.next_pending_alarm_clk == CLOCK_MAX);
+    /* A snapshot keeps the timers in phase: Alpharay starts timer 1 once
+       with a four line period and relies on it for its HUD split.  A
+       restore over a different timer state must continue exactly as the
+       machine that saved it. */
+    {
+        snapshot_module_t m;
+        unsigned int saved[3];
+        unsigned int after[3];
+        unsigned int irqs_after[3];
+        CLOCK irq_after[3];
+        CLOCK snap_clk;
+
+        memset(&m, 0, sizeof(m));
+        ted_timer_reset();
+        start(0, 228);
+        start(1, 0x1000);
+        start(2, 0x2000);
+        advance(1001);
+        ted_timer_store(4, 0x55);
+        advance(333);
+        snap_clk = maincpu_clk;
+        assert(ted_timer_snapshot_write(&m) == 0);
+        for (i = 0; i < 3; i++) {
+            saved[i] = count(i);
+            irqs[i] = 0;
+        }
+        advance(20000);
+        for (i = 0; i < 3; i++) {
+            after[i] = count(i);
+            irqs_after[i] = irqs[i];
+            irq_after[i] = irq_clock[i];
+        }
+        ted_timer_reset();
+        maincpu_clk = snap_clk;
+        start(0, 0x39f1);
+        assert(ted_timer_snapshot_read(&m) == 0);
+        assert(ted.t1_start == 228);
+        assert(ted.timer_running[0] && ted.timer_running[1]
+               && !ted.timer_running[2]);
+        for (i = 0; i < 3; i++) {
+            assert(count(i) == saved[i]);
+            irqs[i] = 0;
+        }
+        advance(20000);
+        for (i = 0; i < 3; i++) {
+            assert(count(i) == after[i]);
+            assert(irqs[i] == irqs_after[i]);
+            assert(irqs[i] == 0 || irq_clock[i] == irq_after[i]);
+        }
+        assert(irqs_after[0] > 0);
+        m.pos = 0;
+        m.size = 3;
+        assert(ted_timer_snapshot_read(&m) < 0);
+    }
     puts("TED timer regression tests passed");
     return 0;
 }

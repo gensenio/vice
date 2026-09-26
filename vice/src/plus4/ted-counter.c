@@ -102,6 +102,12 @@ void ted_counter_store(uint8_t value)
     int delta = (int)cycle - (int)next;
 
     ted.counter_overflow_until = column < 114 ? 0 : maincpu_clk + 128 - column;
+    /* The vertical counter advances when the horizontal counter reaches dot
+       384 (column 96); the line ends two columns later.  A write landing on
+       column 97 has passed the increment without triggering it, so the line
+       ends with its number unchanged and the following lines, including
+       the raster interrupt line, come one line later.  */
+    ted.line_repeat = (column == 97);
     ted.last_emulate_line_clk += delta;
     ted.draw_clk += delta;
     alarm_set(ted.raster_draw_alarm, ted.draw_clk);
@@ -112,8 +118,12 @@ void ted_counter_store(uint8_t value)
     alarm_set(ted.raster_fetch_alarm, ted.fetch_clk);
     if (ted.raster_irq_clk != CLOCK_MAX) {
         ted.raster_irq_clk += delta;
+        if (ted.line_repeat) {
+            ted.raster_irq_clk += ted.cycles_per_line;
+        }
         alarm_set(ted.raster_irq_alarm, ted.raster_irq_clk);
     }
+    ted_delay_hold_clock(cycle, next);
     ted_delay_resync();
 }
 

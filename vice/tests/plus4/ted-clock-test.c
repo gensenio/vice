@@ -107,6 +107,79 @@ int main(void)
             }
         }
     }
+    /* A $FF1E write skipping a clock switch keeps the CPU clock until the
+       counter reaches the next switch.  Alpharay moves the counter from the
+       fetch window to slot 1 ($39) or 113 ($3D) and runs six CPU cycles
+       to its next write: single clock continues on the odd slots until the
+       window starts again at slot 4. */
+    {
+        static const unsigned int to[2] = { 1, 113 };
+        static const CLOCK held[2] = { 12, 12 };
+        static const CLOCK position[2] = { 10, 8 };
+        CLOCK base;
+        int i;
+        int hold;
+
+        for (i = 0; i < 2; i++) {
+            for (hold = 0; hold < 2; hold++) {
+                memset(&ted, 0, sizeof(ted));
+                ted.cycles_per_line = 114;
+                ted.fastmode = 1;
+                ted.character_fetch_on = 1;
+                ted.last_emulate_line_clk = 114 * 10;
+                base = maincpu_clk = ted.last_emulate_line_clk + to[i];
+                if (hold) {
+                    ted_delay_hold_clock(75, to[i]);
+                    assert(ted.fetch_clock_hold);
+                    assert(ted.clock_hold_end == base + (118 - to[i]) % 114);
+                    assert(ted.refresh_clock_hold_end == 0);
+                }
+                ted_delay_resync();
+                maincpu_clk += 6;
+                ted_delay_clk();
+                assert(maincpu_clk - base == (hold ? held[i] : position[i]));
+            }
+        }
+
+        /* Entering the window from double clock keeps double clock until
+           the refresh starts. */
+        memset(&ted, 0, sizeof(ted));
+        ted.cycles_per_line = 114;
+        ted.fastmode = 1;
+        ted.character_fetch_on = 1;
+        base = maincpu_clk = 20;
+        ted_delay_hold_clock(105, 20);
+        assert(!ted.fetch_clock_hold && ted.clock_hold_end == base + 72);
+        ted_delay_resync();
+        maincpu_clk += 6;
+        ted_delay_clk();
+        assert(maincpu_clk == base + 6);
+        /* No hold when the clock does not change. */
+        ted.clock_hold_end = 0;
+        ted.fetch_clock_hold_end = 0;
+        ted.refresh_clock_hold_end = 0;
+        ted_delay_hold_clock(30, 60);
+        assert(ted.clock_hold_end == 0);
+
+        /* From the fetch window into the refresh: the refresh clock stays
+           off, but the fetch clock stays on past the end of the refresh,
+           so the CPU keeps single clock into the next line. */
+        memset(&ted, 0, sizeof(ted));
+        ted.cycles_per_line = 114;
+        ted.fastmode = 1;
+        ted.character_fetch_on = 1;
+        base = maincpu_clk = 95;
+        ted_delay_hold_clock(50, 95);
+        assert(ted.fetch_clock_hold && ted.fetch_clock_hold_end == base + 23);
+        assert(!ted.refresh_clock_hold && ted.refresh_clock_hold_end == base + 6);
+        ted_delay_resync();
+        maincpu_clk += 10;
+        ted_delay_clk();
+        /* The odd slots 97 to 113 take nine CPU cycles, the tenth is at
+           slot 1 of the next line. */
+        assert(maincpu_clk == 95 + 20);
+    }
+
     puts("TED CPU clock slots passed (all phases, single/double clock, display/border)");
     return 0;
 }

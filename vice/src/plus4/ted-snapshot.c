@@ -41,6 +41,7 @@
 #include "ted-irq.h"
 #include "ted-snapshot.h"
 #include "ted-sound.h"
+#include "ted-timer.h"
 #include "ted.h"
 #include "tedtypes.h"
 #include "types.h"
@@ -72,7 +73,7 @@ void ted_snapshot_prepare(void)
 
     FIXME: this snapshot module is severely broken:
     - video stuff is incomplete/buggy
-    - timer are completely missing
+    - timers are saved since version 1.12 only
 
     NOTE: if you run into problems when testing, try running with a clean config and sound disabled
 
@@ -105,7 +106,7 @@ void ted_snapshot_prepare(void)
 
 static char snap_module_name[] = "TED";
 #define SNAP_MAJOR 1
-#define SNAP_MINOR 11
+#define SNAP_MINOR 12
 
 int ted_snapshot_write_module(snapshot_t *s)
 {
@@ -212,6 +213,19 @@ int ted_snapshot_write_module(snapshot_t *s)
 
     if (SMW_W(m, (uint16_t)ted.dma_line) < 0
         || SMW_B(m, (uint8_t)ted.chr_pos_latch) < 0) {
+        goto fail;
+    }
+
+    /* Version 1.12: timer reload value, counters and run state, a pending
+       line repeat and a held CPU clock. */
+    if (ted_timer_snapshot_write(m) < 0
+        || SMW_B(m, (uint8_t)ted.line_repeat) < 0
+        || SMW_CLOCK(m, ted.fetch_clock_hold_end > maincpu_clk
+                        ? ted.fetch_clock_hold_end - maincpu_clk : 0) < 0
+        || SMW_B(m, (uint8_t)ted.fetch_clock_hold) < 0
+        || SMW_CLOCK(m, ted.refresh_clock_hold_end > maincpu_clk
+                        ? ted.refresh_clock_hold_end - maincpu_clk : 0) < 0
+        || SMW_B(m, (uint8_t)ted.refresh_clock_hold) < 0) {
         goto fail;
     }
 
@@ -462,6 +476,32 @@ int ted_snapshot_read_module(snapshot_t *s)
             || ted.dma_line > 511 || ted.chr_pos_latch > 1) {
             goto fail;
         }
+    }
+    /* Older modules do not contain the timers, which keep their state.  */
+    ted.line_repeat = 0;
+    ted.fetch_clock_hold_end = 0;
+    ted.refresh_clock_hold_end = 0;
+    if (snapshot_version_is_bigger(major_version, minor_version, 1, 11)) {
+        CLOCK fetch_hold, refresh_hold;
+
+        if (ted_timer_snapshot_read(m) < 0
+            || SMR_B_INT(m, &ted.line_repeat) < 0
+            || SMR_CLOCK(m, &fetch_hold) < 0
+            || SMR_B_INT(m, &ted.fetch_clock_hold) < 0
+            || SMR_CLOCK(m, &refresh_hold) < 0
+            || SMR_B_INT(m, &ted.refresh_clock_hold) < 0
+            || ted.line_repeat > 1 || ted.fetch_clock_hold > 1
+            || ted.refresh_clock_hold > 1
+            || fetch_hold > ted.cycles_per_line
+            || refresh_hold > ted.cycles_per_line) {
+            goto fail;
+        }
+        ted.fetch_clock_hold_end = fetch_hold ? maincpu_clk + fetch_hold : 0;
+        ted.refresh_clock_hold_end = refresh_hold ? maincpu_clk + refresh_hold : 0;
+    }
+    ted.clock_hold_end = ted.fetch_clock_hold_end;
+    if (ted.refresh_clock_hold_end > ted.clock_hold_end) {
+        ted.clock_hold_end = ted.refresh_clock_hold_end;
     }
     ted_delay_resync();
 

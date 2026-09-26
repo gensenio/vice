@@ -281,6 +281,17 @@ struct ted_s {
     /* Horizontal-event state.  Clocks use the CPU double-clock unit. */
     CLOCK counter_clk;
     CLOCK counter_overflow_until;
+    /* A horizontal counter write skipped the vertical counter increment:
+       the line ends with its number unchanged.  */
+    int line_repeat;
+    /* A horizontal counter write skipped the switch of a clock flip-flop,
+       which keeps its state until the given clock; `clock_hold_end' is
+       the later of the two.  */
+    CLOCK fetch_clock_hold_end;
+    int fetch_clock_hold;
+    CLOCK refresh_clock_hold_end;
+    int refresh_clock_hold;
+    CLOCK clock_hold_end;
     int counter_increment;
     /* Enabled by the first attribute fetch, independently of bitmap fetch. */
     int row_counter_active;
@@ -427,6 +438,7 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data);
 void ted_delay_clk(void);
 void ted_delay_oldclk(CLOCK num);
 void ted_delay_resync(void);
+void ted_delay_hold_clock(unsigned int from, unsigned int to);
 int ted_dma_halts_cpu(CLOCK clk, int after_write);
 CLOCK ted_delay_irq_clk(CLOCK clk);
 

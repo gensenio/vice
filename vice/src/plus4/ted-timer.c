@@ -31,6 +31,7 @@
 #include "alarm.h"
 #include "log.h"
 #include "maincpu.h"
+#include "snapshot.h"
 #include "ted-irq.h"
 #include "ted-timer.h"
 #include "tedtypes.h"
@@ -278,6 +279,82 @@ uint8_t ted_timer_read(uint16_t addr)
         case 5:
             return ted_timer_t3_read_high();
     }
+    return 0;
+}
+
+/* Return the clocks left until the next underflow of a timer: the value
+   at its last restart minus the clocks elapsed since, as the reads do.  A
+   running timer whose alarm is due but not yet served has none left.  */
+static CLOCK ted_timer_remaining(CLOCK value, CLOCK last_restart, int running)
+{
+    CLOCK elapsed;
+
+    if (!running) {
+        return value;
+    }
+    elapsed = maincpu_clk - last_restart;
+    return (elapsed < value) ? value - elapsed : 0;
+}
+
+static void ted_timer_restart(alarm_t *alarm, CLOCK *value,
+                              CLOCK *last_restart, int running)
+{
+    alarm_unset(alarm);
+    *last_restart = maincpu_clk;
+    if (running) {
+        alarm_set(alarm, maincpu_clk + *value);
+    }
+}
+
+/* The counters are saved as the clocks left until their next underflow
+   (two per single clock), timer 1 also saves its reload value.  */
+int ted_timer_snapshot_write(snapshot_module_t *m)
+{
+    return SMW_W(m, (uint16_t)ted.t1_start) < 0
+        || SMW_B(m, (uint8_t)ted.timer_running[0]) < 0
+        || SMW_B(m, (uint8_t)ted.timer_running[1]) < 0
+        || SMW_B(m, (uint8_t)ted.timer_running[2]) < 0
+        || SMW_DW(m, (uint32_t)ted_timer_remaining(t1_value, t1_last_restart,
+                                                   ted.timer_running[0])) < 0
+        || SMW_DW(m, (uint32_t)ted_timer_remaining(t2_value, t2_last_restart,
+                                                   ted.timer_running[1])) < 0
+        || SMW_DW(m, (uint32_t)ted_timer_remaining(t3_value, t3_last_restart,
+                                                   ted.timer_running[2])) < 0
+        ? -1 : 0;
+}
+
+int ted_timer_snapshot_read(snapshot_module_t *m)
+{
+    uint16_t start;
+    uint8_t running[3];
+    uint32_t value[3];
+    int i;
+
+    if (SMR_W(m, &start) < 0
+        || SMR_B(m, &running[0]) < 0
+        || SMR_B(m, &running[1]) < 0
+        || SMR_B(m, &running[2]) < 0
+        || SMR_DW(m, &value[0]) < 0
+        || SMR_DW(m, &value[1]) < 0
+        || SMR_DW(m, &value[2]) < 0) {
+        return -1;
+    }
+    for (i = 0; i < 3; i++) {
+        if (running[i] > 1 || value[i] > 65536 * 2) {
+            return -1;
+        }
+        ted.timer_running[i] = running[i];
+    }
+    ted.t1_start = start;
+    t1_value = value[0];
+    t2_value = value[1];
+    t3_value = value[2];
+    ted_timer_restart(ted_t1_alarm, &t1_value, &t1_last_restart,
+                      ted.timer_running[0]);
+    ted_timer_restart(ted_t2_alarm, &t2_value, &t2_last_restart,
+                      ted.timer_running[1]);
+    ted_timer_restart(ted_t3_alarm, &t3_value, &t3_last_restart,
+                      ted.timer_running[2]);
     return 0;
 }
 
