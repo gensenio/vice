@@ -129,9 +129,10 @@ void ted_counter_store(uint8_t value)
 
 unsigned int ted_counter_read(void)
 {
-    unsigned int cycle = TED_RASTER_CYCLE(maincpu_clk);
+    CLOCK clk = TED_COUNTER_CLK;
+    unsigned int cycle = TED_RASTER_CYCLE(clk);
     unsigned int column = cycle < 16 ? cycle + 98 : cycle - 16;
-    if (maincpu_clk < ted.counter_overflow_until) {
+    if (clk < ted.counter_overflow_until) {
         column += 14;
     }
     return (column << 1) & 0xfe;

@@ -57,6 +57,8 @@ void ted_screenshot(struct screenshot_s *screenshot);
 void ted_async_refresh(struct canvas_refresh_s *r);
 void ted_shutdown(void);
 void ted_change_timing(struct machine_timing_s *machine_timing, int bordermode);
+void ted_set_ntsc_mode(int ntsc);
+void ted_set_freeze(int freeze);
 
 void ted_snapshot_prepare(void);
 int ted_snapshot_write_module(struct snapshot_s *s);

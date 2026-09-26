@@ -16,6 +16,10 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
     ted.last_emulate_line_clk += 114;
 }
 
+void ted_freeze_update(void)
+{
+}
+
 static CLOCK clock_slots(CLOCK clock, unsigned int count, int fast, int fetch)
 {
     unsigned int phase;

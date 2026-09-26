@@ -54,14 +54,41 @@ static CLOCK t1_value;
 static CLOCK t2_value;
 static CLOCK t3_value;
 
+/* Non-zero while $FF07 bit 5 stops the counting of the timers, since
+   `timers_frozen_clk'.  */
+static int timers_frozen;
+static CLOCK timers_frozen_clk;
+
+/* Non-zero if timer `n' counts down.  */
+static int ted_timer_counting(int n)
+{
+    return ted.timer_running[n] && !timers_frozen;
+}
+
+/* Return the count after an underflow at `clk' with period `period': the
+   counter counts until the freeze if it is frozen.  */
+static CLOCK ted_timer_reload(CLOCK period, CLOCK clk)
+{
+    if (timers_frozen && timers_frozen_clk > clk) {
+        return period - (timers_frozen_clk - clk) % period;
+    }
+    return period;
+}
+
 /*-----------------------------------------------------------------------*/
 
 static void ted_t1_alarm_handler(CLOCK offset, void *data)
 {
-    alarm_set(ted_t1_alarm, maincpu_clk
-              + (ted.t1_start == 0 ? 65536 : ted.t1_start) * 2 - offset);
+    /* An underflow due at a freeze reloads the counter, which waits. */
+    if (!timers_frozen) {
+        alarm_set(ted_t1_alarm, maincpu_clk
+                  + (ted.t1_start == 0 ? 65536 : ted.t1_start) * 2 - offset);
+    } else {
+        alarm_unset(ted_t1_alarm);
+    }
     /* Keep the value at the restart clock; reads account for offset once. */
-    t1_value = (ted.t1_start == 0 ? 65536 : ted.t1_start) * 2;
+    t1_value = ted_timer_reload((ted.t1_start == 0 ? 65536 : ted.t1_start) * 2,
+                                maincpu_clk - offset);
 #ifdef DEBUG_TIMER
     log_debug(LOG_DEFAULT, "TI1 ALARM %x", maincpu_clk);
 #endif
@@ -71,8 +98,12 @@ static void ted_t1_alarm_handler(CLOCK offset, void *data)
 
 static void ted_t2_alarm_handler(CLOCK offset, void *data)
 {
-    alarm_set(ted_t2_alarm, maincpu_clk + 65536 * 2 - offset);
-    t2_value = 65536 * 2;
+    if (!timers_frozen) {
+        alarm_set(ted_t2_alarm, maincpu_clk + 65536 * 2 - offset);
+    } else {
+        alarm_unset(ted_t2_alarm);
+    }
+    t2_value = ted_timer_reload(65536 * 2, maincpu_clk - offset);
 #ifdef DEBUG_TIMER
     log_debug(LOG_DEFAULT, "TI2 ALARM %x", maincpu_clk);
 #endif
@@ -82,8 +113,12 @@ static void ted_t2_alarm_handler(CLOCK offset, void *data)
 
 static void ted_t3_alarm_handler(CLOCK offset, void *data)
 {
-    alarm_set(ted_t3_alarm, maincpu_clk + 65536 * 2 - offset);
-    t3_value = 65536 * 2;
+    if (!timers_frozen) {
+        alarm_set(ted_t3_alarm, maincpu_clk + 65536 * 2 - offset);
+    } else {
+        alarm_unset(ted_t3_alarm);
+    }
+    t3_value = ted_timer_reload(65536 * 2, maincpu_clk - offset);
 #ifdef DEBUG_TIMER
     log_debug(LOG_DEFAULT, "TI3 ALARM %x", maincpu_clk);
 #endif
@@ -96,7 +131,7 @@ static void ted_t3_alarm_handler(CLOCK offset, void *data)
 static void ted_timer_t1_store_low(uint8_t value)
 {
     alarm_unset(ted_t1_alarm);
-    if (ted.timer_running[0]) {
+    if (ted_timer_counting(0)) {
         t1_value -= maincpu_clk - t1_last_restart;
         t1_last_restart = maincpu_clk;
     }
@@ -108,8 +143,10 @@ static void ted_timer_t1_store_high(uint8_t value)
 {
     alarm_unset(ted_t1_alarm);
     t1_value = (ted.t1_start = (ted.t1_start & 0x00ff) | (value << 8)) << 1;
-    alarm_set(ted_t1_alarm, maincpu_clk
-              + (ted.t1_start == 0 ? 65536 : ted.t1_start) * 2);
+    if (!timers_frozen) {
+        alarm_set(ted_t1_alarm, maincpu_clk
+                  + (ted.t1_start == 0 ? 65536 : ted.t1_start) * 2);
+    }
     t1_last_restart = maincpu_clk;
     ted.timer_running[0] = 1;
 }
@@ -118,7 +155,7 @@ static void ted_timer_t2_store_low(uint8_t value)
 {
     alarm_unset(ted_t2_alarm);
     /* Writes replace only one byte of the live counter. */
-    if (ted.timer_running[1]) {
+    if (ted_timer_counting(1)) {
         t2_value -= maincpu_clk - t2_last_restart;
     }
     t2_value = (t2_value & 0x1fe00) | ((CLOCK)value << 1);
@@ -128,12 +165,14 @@ static void ted_timer_t2_store_low(uint8_t value)
 static void ted_timer_t2_store_high(uint8_t value)
 {
     alarm_unset(ted_t2_alarm);
-    if (ted.timer_running[1]) {
+    if (ted_timer_counting(1)) {
         t2_value -= maincpu_clk - t2_last_restart;
     }
     t2_value = (t2_value & 0x1fe) | ((CLOCK)value << 9);
-    alarm_set(ted_t2_alarm, maincpu_clk
-              + (t2_value == 0 ? 65536 * 2 : t2_value));
+    if (!timers_frozen) {
+        alarm_set(ted_t2_alarm, maincpu_clk
+                  + (t2_value == 0 ? 65536 * 2 : t2_value));
+    }
     t2_last_restart = maincpu_clk;
     ted.timer_running[1] = 1;
 }
@@ -142,7 +181,7 @@ static void ted_timer_t3_store_low(uint8_t value)
 {
     alarm_unset(ted_t3_alarm);
     /* Writes replace only one byte of the live counter. */
-    if (ted.timer_running[2]) {
+    if (ted_timer_counting(2)) {
         t3_value -= maincpu_clk - t3_last_restart;
     }
     t3_value = (t3_value & 0x1fe00) | ((CLOCK)value << 1);
@@ -152,12 +191,14 @@ static void ted_timer_t3_store_low(uint8_t value)
 static void ted_timer_t3_store_high(uint8_t value)
 {
     alarm_unset(ted_t3_alarm);
-    if (ted.timer_running[2]) {
+    if (ted_timer_counting(2)) {
         t3_value -= maincpu_clk - t3_last_restart;
     }
     t3_value = (t3_value & 0x1fe) | ((CLOCK)value << 9);
-    alarm_set(ted_t3_alarm, maincpu_clk
-              + (t3_value == 0 ? 65536 * 2 : t3_value));
+    if (!timers_frozen) {
+        alarm_set(ted_t3_alarm, maincpu_clk
+                  + (t3_value == 0 ? 65536 * 2 : t3_value));
+    }
     t3_last_restart = maincpu_clk;
     ted.timer_running[2] = 1;
 }
@@ -167,7 +208,7 @@ static uint8_t ted_timer_t1_read_low(void)
 #ifdef DEBUG_TIMER
     log_debug(LOG_DEFAULT, "TI1 READL %02x", t1_value & 0xff);
 #endif
-    if (ted.timer_running[0]) {
+    if (ted_timer_counting(0)) {
         t1_value -= maincpu_clk - t1_last_restart;
         t1_last_restart = maincpu_clk;
     }
@@ -179,7 +220,7 @@ static uint8_t ted_timer_t1_read_high(void)
 #ifdef DEBUG_TIMER
     log_debug(LOG_DEFAULT, "TI1 READH %02x", t1_value >> 8);
 #endif
-    if (ted.timer_running[0]) {
+    if (ted_timer_counting(0)) {
         t1_value -= maincpu_clk - t1_last_restart;
         t1_last_restart = maincpu_clk;
     }
@@ -191,7 +232,7 @@ static uint8_t ted_timer_t2_read_low(void)
 #ifdef DEBUG_TIMER
     log_debug(LOG_DEFAULT, "TI2 READL %02x", t2_value & 0xff);
 #endif
-    if (ted.timer_running[1]) {
+    if (ted_timer_counting(1)) {
         t2_value -= maincpu_clk - t2_last_restart;
         t2_last_restart = maincpu_clk;
     }
@@ -203,7 +244,7 @@ static uint8_t ted_timer_t2_read_high(void)
 #ifdef DEBUG_TIMER
     log_debug(LOG_DEFAULT, "TI2 READH %02x", t2_value >> 8);
 #endif
-    if (ted.timer_running[1]) {
+    if (ted_timer_counting(1)) {
         t2_value -= maincpu_clk - t2_last_restart;
         t2_last_restart = maincpu_clk;
     }
@@ -215,7 +256,7 @@ static uint8_t ted_timer_t3_read_low(void)
 #ifdef DEBUG_TIMER
     log_debug(LOG_DEFAULT, "TI3 READL %02x", t3_value & 0xff);
 #endif
-    if (ted.timer_running[2]) {
+    if (ted_timer_counting(2)) {
         t3_value -= maincpu_clk - t3_last_restart;
         t3_last_restart = maincpu_clk;
     }
@@ -227,7 +268,7 @@ static uint8_t ted_timer_t3_read_high(void)
 #ifdef DEBUG_TIMER
     log_debug(LOG_DEFAULT, "TI3 READH %02x", t3_value >> 8);
 #endif
-    if (ted.timer_running[2]) {
+    if (ted_timer_counting(2)) {
         t3_value -= maincpu_clk - t3_last_restart;
         t3_last_restart = maincpu_clk;
     }
@@ -301,8 +342,72 @@ static void ted_timer_restart(alarm_t *alarm, CLOCK *value,
 {
     alarm_unset(alarm);
     *last_restart = maincpu_clk;
-    if (running) {
+    if (running && !timers_frozen) {
         alarm_set(alarm, maincpu_clk + *value);
+    }
+}
+
+/* Return the clocks a counting timer has left: a counter started at 0
+   underflows after 65536 single clocks.  */
+static CLOCK ted_timer_left(CLOCK value, CLOCK last_restart)
+{
+    CLOCK period = value == 0 ? 65536 * 2 : value;
+    CLOCK elapsed = maincpu_clk - last_restart;
+
+    return elapsed < period ? period - elapsed : 0;
+}
+
+static void ted_timer_pause(alarm_t *alarm, CLOCK *value, CLOCK last_restart,
+                            int running)
+{
+    CLOCK left;
+
+    if (running) {
+        left = ted_timer_left(*value, last_restart);
+        /* An underflow already due keeps its alarm, which reloads.  */
+        if (left != 0) {
+            *value = left;
+            alarm_unset(alarm);
+        }
+    }
+}
+
+static void ted_timer_resume(alarm_t *alarm, CLOCK value,
+                             CLOCK *last_restart, int running, CLOCK run)
+{
+    *last_restart = maincpu_clk - run;
+    if (running) {
+        alarm_set(alarm, *last_restart + (value == 0 ? 65536 * 2 : value));
+    }
+}
+
+/* $FF07 bit 5 stops the timers; they keep their counts and count again
+   when it is cleared, `run' clocks before now.  */
+void ted_timer_freeze(int freeze, CLOCK run)
+{
+    if (freeze) {
+        if (timers_frozen) {
+            return;
+        }
+        ted_timer_pause(ted_t1_alarm, &t1_value, t1_last_restart,
+                        ted.timer_running[0]);
+        ted_timer_pause(ted_t2_alarm, &t2_value, t2_last_restart,
+                        ted.timer_running[1]);
+        ted_timer_pause(ted_t3_alarm, &t3_value, t3_last_restart,
+                        ted.timer_running[2]);
+        timers_frozen = 1;
+        timers_frozen_clk = maincpu_clk;
+    } else {
+        if (!timers_frozen) {
+            return;
+        }
+        timers_frozen = 0;
+        ted_timer_resume(ted_t1_alarm, t1_value, &t1_last_restart,
+                         ted.timer_running[0], run);
+        ted_timer_resume(ted_t2_alarm, t2_value, &t2_last_restart,
+                         ted.timer_running[1], run);
+        ted_timer_resume(ted_t3_alarm, t3_value, &t3_last_restart,
+                         ted.timer_running[2], run);
     }
 }
 
@@ -315,11 +420,11 @@ int ted_timer_snapshot_write(snapshot_module_t *m)
         || SMW_B(m, (uint8_t)ted.timer_running[1]) < 0
         || SMW_B(m, (uint8_t)ted.timer_running[2]) < 0
         || SMW_DW(m, (uint32_t)ted_timer_remaining(t1_value, t1_last_restart,
-                                                   ted.timer_running[0])) < 0
+                                                   ted_timer_counting(0))) < 0
         || SMW_DW(m, (uint32_t)ted_timer_remaining(t2_value, t2_last_restart,
-                                                   ted.timer_running[1])) < 0
+                                                   ted_timer_counting(1))) < 0
         || SMW_DW(m, (uint32_t)ted_timer_remaining(t3_value, t3_last_restart,
-                                                   ted.timer_running[2])) < 0
+                                                   ted_timer_counting(2))) < 0
         ? -1 : 0;
 }
 
@@ -375,4 +480,5 @@ void ted_timer_reset(void)
     t1_value = t2_value = t3_value = 0;
     t1_last_restart = t2_last_restart = t3_last_restart = maincpu_clk;
     ted.timer_running[0] = ted.timer_running[1] = ted.timer_running[2] = 0;
+    timers_frozen = 0;
 }
