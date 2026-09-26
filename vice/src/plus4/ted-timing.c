@@ -153,19 +153,85 @@ void ted_delay_resync(void)
     old_cycle = TED_RASTER_CYCLE(maincpu_clk);
 }
 
-/* Return non-zero if the CPU runs a cycle in clock slot `cycle' of the
-   line.  In single clock TED takes the even slots, see `ted_delay_clk()'.  */
-static int ted_cpu_slot(unsigned int cycle)
-{
-    if (ted.fastmode == 0) {
-        return cycle & 1;
-    }
+/* TED runs the CPU in single clock while its character fetch clock (on
+   lines with fetches) or its DRAM refresh clock is on.  Both are
+   flip-flops, switched when the horizontal counter reaches their first
+   and last slots: the fetch clock from slot 4 to 91, the refresh clock
+   from 92 to 100.  */
+#define TED_FETCH_CLOCK_ON      4U
+#define TED_FETCH_CLOCK_OFF     92U
+#define TED_REFRESH_CLOCK_ON    92U
+#define TED_REFRESH_CLOCK_OFF   101U
 
-    if (((cycle & 1) == 0) && (cycle <= 100)
-        && (cycle >= (ted.character_fetch_on ? 4U : 92U))) {
-        return 0;
+static int ted_fetch_clock(CLOCK clk, unsigned int cycle)
+{
+    if (clk < ted.fetch_clock_hold_end) {
+        return ted.fetch_clock_hold;
     }
-    return 1;
+    return cycle >= TED_FETCH_CLOCK_ON && cycle < TED_FETCH_CLOCK_OFF;
+}
+
+static int ted_refresh_clock(CLOCK clk, unsigned int cycle)
+{
+    if (clk < ted.refresh_clock_hold_end) {
+        return ted.refresh_clock_hold;
+    }
+    return cycle >= TED_REFRESH_CLOCK_ON && cycle < TED_REFRESH_CLOCK_OFF;
+}
+
+/* Return non-zero if the CPU runs a cycle in clock slot `cycle' of the
+   line at `clk'.  In single clock TED takes the even slots, see
+   `ted_delay_clk()'.  */
+static int ted_cpu_slot(CLOCK clk, unsigned int cycle)
+{
+    int single;
+
+    single = ted.fastmode == 0
+             || (ted.character_fetch_on && ted_fetch_clock(clk, cycle))
+             || ted_refresh_clock(clk, cycle);
+    return !single || (cycle & 1);
+}
+
+/* Keep a clock flip-flop in `state' after the counter moved to slot `to',
+   until the counter reaches the next slot switching it.  */
+static void ted_hold_flip_flop(int *hold, CLOCK *hold_end, int state,
+                               int state_at_to, unsigned int to,
+                               unsigned int on, unsigned int off)
+{
+    unsigned int to_on, to_off;
+
+    *hold_end = 0;
+    if (state == state_at_to) {
+        return;
+    }
+    to_on = (on + ted.cycles_per_line - to) % ted.cycles_per_line;
+    to_off = (off + ted.cycles_per_line - to) % ted.cycles_per_line;
+    if (to_on == 0 || to_off == 0) {
+        return;
+    }
+    *hold = state;
+    *hold_end = maincpu_clk + (to_on < to_off ? to_on : to_off);
+}
+
+/* A `$FF1E' write moves the counter from slot `from' to slot `to'
+   without passing the slots in between, so the clock flip-flops keep
+   their state until the counter reaches their next switch.  */
+void ted_delay_hold_clock(unsigned int from, unsigned int to)
+{
+    int fetch = ted_fetch_clock(maincpu_clk, from);
+    int refresh = ted_refresh_clock(maincpu_clk, from);
+
+    ted_hold_flip_flop(&ted.fetch_clock_hold, &ted.fetch_clock_hold_end,
+                       fetch, ted_fetch_clock(CLOCK_MAX, to), to,
+                       TED_FETCH_CLOCK_ON, TED_FETCH_CLOCK_OFF);
+    ted_hold_flip_flop(&ted.refresh_clock_hold,
+                       &ted.refresh_clock_hold_end, refresh,
+                       ted_refresh_clock(CLOCK_MAX, to), to,
+                       TED_REFRESH_CLOCK_ON, TED_REFRESH_CLOCK_OFF);
+    ted.clock_hold_end = ted.fetch_clock_hold_end;
+    if (ted.refresh_clock_hold_end > ted.clock_hold_end) {
+        ted.clock_hold_end = ted.refresh_clock_hold_end;
+    }
 }
 
 /* The 7501 takes an interrupt at an opcode fetch once the request has been
@@ -189,11 +255,11 @@ CLOCK ted_delay_irq_clk(CLOCK clk)
     }
 
     /* Find the slot of the second CPU cycle from `clk'.  */
-    cpu_cycles = ted_cpu_slot(cycle);
+    cpu_cycles = ted_cpu_slot(clk, cycle);
     while (cpu_cycles < 2) {
         clk++;
         cycle = (cycle + 1) % ted.cycles_per_line;
-        cpu_cycles += ted_cpu_slot(cycle);
+        cpu_cycles += ted_cpu_slot(clk, cycle);
     }
 
     return clk + 1 - INTERRUPT_DELAY;
@@ -212,6 +278,30 @@ static void ted_stretch_cpu_clk(CLOCK num)
     maincpu_clk += num;
 }
 
+/* Place the CPU cycles run since the last call on the slots of a held
+   clock (see `ted_delay_hold_clock()'), stepping one clock at a time like
+   the position based code: each CPU cycle takes the next CPU slot.  Return
+   non-zero when they all fit in the hold; otherwise leave the remaining
+   cycles, from the end of the hold, to the position based code.  */
+static int ted_delay_clk_held(void)
+{
+    CLOCK remaining = maincpu_clk - old_maincpu_clk;
+    CLOCK clk = old_maincpu_clk;
+    unsigned int cycle = (unsigned int)old_cycle;
+
+    while (remaining > 0 && clk + 1 < ted.clock_hold_end) {
+        clk++;
+        cycle = (cycle + 1) % ted.cycles_per_line;
+        if (ted_cpu_slot(clk, cycle)) {
+            remaining--;
+        }
+    }
+    old_maincpu_clk = clk;
+    old_cycle = cycle;
+    maincpu_clk = clk + remaining;
+    return remaining == 0;
+}
+
 void ted_delay_clk(void)
 {
     CLOCK diff;
@@ -220,6 +310,9 @@ void ted_delay_clk(void)
        one clock, so a write rewound by `ted_handle_pending_alarms()' can be
        before the last stretch.  Its cycles are already accounted for.  */
     if (maincpu_clk <= old_maincpu_clk) {
+        return;
+    }
+    if (old_maincpu_clk < ted.clock_hold_end && ted_delay_clk_held()) {
         return;
     }
 

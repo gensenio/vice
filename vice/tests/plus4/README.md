@@ -23,6 +23,19 @@ data sheet does not fully specify isolated-byte writes to timer 1's live
 counter; those semantics are unchanged and are not asserted by these tests.
 The original implementation fails timer 2's live-high-byte preservation test.
 
+TED snapshots did not contain the timers, so after a restore they kept the
+state of the machine that loaded the snapshot. Alpharay starts timer 1 once
+per level with a four-line period (228 single clocks) and takes the timer
+interrupt in a NOP slide after its line 188 raster interrupt; with a wrong
+reload value the interrupt entered the HUD code anywhere in the frame, which
+cut the HUD's last pixel row and drew a stray line above it. Snapshot
+version 1.12 saves timer 1's reload value, the run state and the clocks left
+until each counter's next underflow. The test saves running and stopped
+timers, restores them over a different timer 1 program and checks the counts
+and interrupt clocks against the uninterrupted run. In a PAL/1541 session,
+Alpharay enters its HUD code at line 190 in every frame both in live play
+and after restoring a gameplay snapshot.
+
 The timer clock is measured in two VICE main-CPU clock units. These tests verify
 the counter/alarm contract, not the exact TED oscillator phase or CPU IRQ-entry
 latency. Passing them is not a claim of cycle-exact display or demo compatibility.
@@ -207,6 +220,43 @@ about one cycle earlier than the two emulators, which is not adopted.
 `ted-irq-test.c` checks the converted clock for a request on a TED slot in
 single clock. `ted-clock-test.c` compares `ted_delay_irq_clk()` with a
 per-slot count over two lines in all clock modes.
+
+### Horizontal counter writes and the CPU clock
+
+TED's single clock comes from two flip-flops, FPGATED's `ext_fetch` and
+`refresh`: the character fetch clock (display lines only) is switched on and
+off as the counter reaches slots 4 and 92, the refresh clock at slots 92 and
+101. A `$FF1E` write moves the counter without passing the slots in between,
+so both keep their state until the counter reaches their next switch
+(YapeSDL's clocking state also changes only at its switch positions).
+VICE derived the clock from the counter position alone. After Alpharay's
+`$FF1E` writes moving the counter from the fetch window to slot 1 (`$39`) or
+113 (`$3D`), it ran the CPU in double clock until slot 4, so the code before
+the next write ran 2 or 4 clocks early and each such frame was 2 or 4 clocks
+short. Alpharay starts its HUD with a timer that divides the frame (four
+lines), so the frames lost moved the HUD code a line late: it reset the row
+counter on line 193 instead of 192, cutting the last pixel row of the HUD and
+drawing a stray row above it. `ted_delay_hold_clock()` now holds each
+flip-flop across a write, and `ted_delay_clk()` places the CPU cycles of a
+held range one slot at a time. Measured frame lengths now match YapeSDL for
+every `$FF1E` pattern of Alpharay (active play, about 4000 frames, the HUD
+entered on line 190 in all of them) and of the Pets Rescue intro, whose
+`$D1` write enters the fetch window from double clock and keeps it. A single
+held clock bit instead of the two flip-flops breaks Rockstar Ate My Border,
+which moves the counter from the fetch window into the refresh.
+
+The vertical counter advances when the counter reaches dot 384 (column 96),
+before the line ends at column 98. A write landing on column 97, after the
+increment point, does not advance it: the line ends with its number unchanged
+(`line_repeat`), and the raster interrupt comes one line later. FPGATED
+decodes the increment from `hcounter == 384`; YapeSDL latches the new line at
+the position a write skips.
+
+`ted-counter-test.c` checks the repeat and the positions reported for the
+clock; `ted-clock-test.c` checks the held clocks for Alpharay's two writes,
+for entering the window from double clock, and for moving from the window
+into the refresh. Snapshot version 1.12 saves the held clocks and a pending
+repeat.
 
 Lykia 1.4's title screen enters its raster IRQ through a 14-entry
 `$FF1E`/`CMP #$C9` stabilizer (offsets 0–13). With the defect, 6 of 7506

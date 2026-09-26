@@ -17,9 +17,18 @@ static alarm_context_t context;
 static alarm_t alarms[3];
 static unsigned int resyncs;
 
+static unsigned int hold_from;
+static unsigned int hold_to;
+
 void ted_delay_resync(void)
 {
     resyncs++;
+}
+
+void ted_delay_hold_clock(unsigned int from, unsigned int to)
+{
+    hold_from = from;
+    hold_to = to;
 }
 
 void alarm_log_too_many_alarms(void)
@@ -291,6 +300,23 @@ int main(void)
     ted_counter_store(0x7f);
     assert(ted.raster_irq_clk == irq - 32);
     assert(alarms[2].pending_idx >= 0);
+
+    /* The vertical counter advances as the counter passes dot 384
+       (column 96).  A write landing on column 97 has passed it: the line
+       ends without advancing and the raster interrupt comes a line later.
+       The CPU clock is decided from the positions before and after. */
+    setup();
+    advance(75);
+    ted.raster_irq_clk = irq = 114 * 100;
+    ted_counter_store(0x3d);
+    assert(ted.line_repeat);
+    assert(hold_from == 75 && hold_to == 113);
+    assert(ted.raster_irq_clk == irq + 75 - 113 + 114);
+    setup();
+    advance(74);
+    ted_counter_store(0x3d);
+    assert(!ted.line_repeat);
+    assert(hold_from == 74 && hold_to == 112);
 
     test_equivalence();
     puts("TED horizontal-counter regressions passed (including batching equivalence)");

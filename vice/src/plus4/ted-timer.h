@@ -35,4 +35,8 @@ void ted_timer_reset(void);
 void ted_timer_store(uint16_t addr, uint8_t value);
 uint8_t ted_timer_read(uint16_t addr);
 
+struct snapshot_module_s;
+int ted_timer_snapshot_write(struct snapshot_module_s *m);
+int ted_timer_snapshot_read(struct snapshot_module_s *m);
+
 #endif

@@ -346,6 +346,10 @@ void ted_reset(void)
 
     ted.last_emulate_line_clk = 0;
     ted.counter_clk = ted.counter_overflow_until = 0;
+    ted.line_repeat = 0;
+    ted.clock_hold_end = 0;
+    ted.fetch_clock_hold_end = 0;
+    ted.refresh_clock_hold_end = 0;
     ted.counter_increment = 0;
     ted.row_counter_active = 0;
 
@@ -423,6 +427,10 @@ void ted_powerup(void)
     ted.idle_data_location = IDLE_NONE;
     ted.last_emulate_line_clk = 0;
     ted.counter_clk = ted.counter_overflow_until = 0;
+    ted.line_repeat = 0;
+    ted.clock_hold_end = 0;
+    ted.fetch_clock_hold_end = 0;
+    ted.refresh_clock_hold_end = 0;
     ted.counter_increment = 0;
     ted.row_counter_active = 0;
 
@@ -670,6 +678,8 @@ void ted_update_video_mode(unsigned int cycle)
    of each line.  */
 void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
 {
+    int repeat;
+
     ted_counter_update(ted.draw_clk);
 
     if (ted.tv_current_line < ted.screen_height) {
@@ -714,8 +724,12 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
     ted.chr_pos_latch = ted.raster.ycounter == 6;
 
     ted.tv_current_line++;
-    ted.ted_raster_counter++;
-    if (ted.ted_raster_counter == ted.screen_height) {
+    repeat = ted.line_repeat;
+    ted.line_repeat = 0;
+    if (!repeat) {
+        ted.ted_raster_counter++;
+    }
+    if (!repeat && ted.ted_raster_counter == ted.screen_height) {
         ted.memptr = 0;
         ted.chr_pos_reload = 0;
         ted.memptr_col = 0;
@@ -765,7 +779,7 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
     /* DO VSYNC if the raster_counter in the TED reached the VSYNC signal */
     /* Also do VSYNC if oversized screen reached a certain threashold, this will result in rolling screen just like on the real thing */
     if (((signed int)(ted.tv_current_line - ted.screen_height) > 40) ||
-        (ted.ted_raster_counter == ted.vsync_line )) {
+        (!repeat && ted.ted_raster_counter == ted.vsync_line)) {
         if (ted.tv_current_line < ted.screen_height) {
             ted.raster.current_line = 0;
             raster_canvas_handle_end_of_frame(&ted.raster);
