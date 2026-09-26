@@ -25,6 +25,24 @@ void ted_update_video_mode(unsigned int cycle)
 {
 }
 
+static int ntsc_mode_calls;
+static int ntsc_mode;
+
+void ted_set_ntsc_mode(int ntsc)
+{
+    ntsc_mode_calls++;
+    ntsc_mode = ntsc;
+}
+
+static int freeze_calls;
+static int freeze;
+
+void ted_set_freeze(int value)
+{
+    freeze_calls++;
+    freeze = value;
+}
+
 static void setup(uint8_t ff07)
 {
     memset(&ted.raster, 0, sizeof(ted.raster));
@@ -84,6 +102,26 @@ int main(void)
     maincpu_clk = 100;
     ted07_store(0x98);
     assert(foreground.count == 0 && next_line.count == 0);
+    assert(ntsc_mode_calls == 0);
+
+    /* Bit 6 selects NTSC mode; only a change of it switches the mode. */
+    setup(0x08);
+    ted07_store(0x48);
+    assert(ntsc_mode_calls == 1 && ntsc_mode);
+    ted07_store(0x58);
+    assert(ntsc_mode_calls == 1);
+    ted07_store(0x18);
+    assert(ntsc_mode_calls == 2 && !ntsc_mode);
+    assert(freeze_calls == 0);
+
+    /* Bit 5 freezes TED; only a change of it starts or ends the freeze. */
+    setup(0x08);
+    ted07_store(0x28);
+    assert(freeze_calls == 1 && freeze);
+    ted07_store(0x38);
+    assert(freeze_calls == 1);
+    ted07_store(0x18);
+    assert(freeze_calls == 2 && !freeze);
 
     puts("TED reverse mode tests passed");
     return 0;

@@ -169,6 +169,10 @@ typedef enum ted_video_mode_s ted_video_mode_t;
 /* Cycle # within the current line.  */
 #define TED_RASTER_CYCLE(clk)       ((unsigned int)((clk) - ted.last_emulate_line_clk - (((clk) - ted.last_emulate_line_clk) >= 114 ? 114 : 0)))
 
+/* Clock of the positions of the counters: while TED is frozen they stay
+   at `ted.freeze_clk'.  */
+#define TED_COUNTER_CLK             (ted.freeze ? ted.freeze_clk : maincpu_clk)
+
 /* `clk' value for the beginning of the current line.  */
 /* FIXME: assigned to (CLOCK)ted.raster_irq_clk in ted-irq.c:ted_irq_set_raster_line() */
 /* FIXME: assigned to (CLOCK)ted.raster_irq_clk in ted-mem.c:ted1c1d_store() */
@@ -364,6 +368,16 @@ struct ted_s {
     struct alarm_s *raster_fetch_alarm;
     struct alarm_s *raster_draw_alarm;
     struct alarm_s *raster_irq_alarm;
+
+    /* $FF07 bit 5 (freeze) stops the horizontal and vertical counters and
+       the timers.  While `freeze' is set, the TED clocks after
+       `freeze_clk' move forward in whole single clocks, so the counters
+       stay where they stopped.  The TV, without sync, keeps drawing lines
+       every `cycles_per_line' clocks from `tv_line_clk'.  */
+    int freeze;
+    CLOCK freeze_clk;
+    CLOCK tv_line_clk;
+    struct alarm_s *tv_line_alarm;
 #if 0
     /* What do we do when the `A_RASTERFETCH' event happens?  */
     ted_fetch_idx_t fetch_idx;
@@ -386,6 +400,7 @@ struct ted_s {
     CLOCK last_emulate_line_clk;
 
     /* Geometry and timing parameters of the selected TED emulation.  */
+    /* Lines of a frame in the mode selected by $FF07 bit 6.  */
     unsigned int screen_height;
     int first_displayed_line;
     int last_displayed_line;
@@ -404,7 +419,13 @@ struct ted_s {
     unsigned int first_dma_line;
     unsigned int last_dma_line;
 
+    /* Line starting the vertical sync in the mode of $FF07 bit 6.  */
     unsigned int vsync_line;
+
+    /* Lines of a frame and vertical sync line of the video standard of the
+       crystal, which the TV and the canvas follow.  */
+    unsigned int tv_height;
+    unsigned int tv_vsync_line;
 
     /* Number of lines the whole screen is shifted up.  */
     int offset;
@@ -439,6 +460,8 @@ void ted_delay_clk(void);
 void ted_delay_oldclk(CLOCK num);
 void ted_delay_resync(void);
 void ted_delay_hold_clock(unsigned int from, unsigned int to);
+void ted_freeze_update(void);
+int ted_freeze_defers(const CLOCK *clk);
 int ted_dma_halts_cpu(CLOCK clk, int after_write);
 CLOCK ted_delay_irq_clk(CLOCK clk);
 

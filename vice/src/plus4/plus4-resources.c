@@ -28,6 +28,7 @@
 #include "vice.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include "kbd.h"
 #include "keyboard.h"
@@ -155,6 +156,42 @@ static int set_ram_size_plus4(int rs, void *param)
     return 0;
 }
 
+/* TED takes PAL or NTSC mode from $FF07 bit 6, which the Kernal sets in
+   its TED initialization: 318004-05 and 318004-01 select PAL mode,
+   318005-05 and the 364 Kernal NTSC mode.  Changing the video standard
+   replaces a Kernal of these selecting the other mode with the Kernal of
+   the selected standard, so that the machine runs in that standard, like
+   the VIC-II model in x64sc.  Other Kernal images are kept.  */
+static void set_kernal_of_sync_factor(int val)
+{
+    static const char * const pal_kernals[] = {
+        PLUS4_KERNAL_PAL_REV5_NAME, PLUS4_KERNAL_NTSC_REV1_NAME, NULL
+    };
+    static const char * const ntsc_kernals[] = {
+        PLUS4_KERNAL_NTSC_REV5_NAME, PLUS4_KERNAL_NTSC_364_NAME, NULL
+    };
+    const char * const *other;
+    const char *to;
+    int i;
+
+    if (val == MACHINE_SYNC_NTSC) {
+        other = pal_kernals;
+        to = PLUS4_KERNAL_NTSC_REV5_NAME;
+    } else {
+        other = ntsc_kernals;
+        to = PLUS4_KERNAL_PAL_REV5_NAME;
+    }
+    if (kernal_rom_name == NULL) {
+        return;
+    }
+    for (i = 0; other[i] != NULL; i++) {
+        if (strcmp(kernal_rom_name, other[i]) == 0) {
+            resources_set_string("KernalName", to);
+            return;
+        }
+    }
+}
+
 static int set_sync_factor(int val, void *param)
 {
     int change_timing = 0;
@@ -167,12 +204,14 @@ static int set_sync_factor(int val, void *param)
         case MACHINE_SYNC_PAL:
             sync_factor = val;
             if (change_timing) {
+                set_kernal_of_sync_factor(val);
                 machine_change_timing(MACHINE_SYNC_PAL, 50, ted_resources.border_mode);
             }
             break;
         case MACHINE_SYNC_NTSC:
             sync_factor = val;
             if (change_timing) {
+                set_kernal_of_sync_factor(val);
                 machine_change_timing(MACHINE_SYNC_NTSC, 60, ted_resources.border_mode);
             }
             break;

@@ -42,6 +42,11 @@
 #define PLUS4_NTSC_RFSH_PER_SEC    (1.0 / ((double)PLUS4_NTSC_CYCLES_PER_RFSH \
                                            / (double)PLUS4_NTSC_CYCLES_PER_SEC))
 
+/* TED in the mode of the other standard ($FF07 bit 6): the crystal divided
+   by 8 instead of 10, or by 10 instead of 8.  */
+#define PLUS4_PAL_CRYSTAL_NTSC_CYCLES_PER_SEC  2216809
+#define PLUS4_NTSC_CRYSTAL_PAL_CYCLES_PER_SEC  1431818
+
 struct printer_context_s;
 
 typedef struct machine_context_s {
@@ -49,5 +54,7 @@ typedef struct machine_context_s {
 } machine_context_t;
 
 extern machine_context_t machine_context;
+
+void plus4_set_ted_ntsc_mode(int ntsc);
 
 #endif

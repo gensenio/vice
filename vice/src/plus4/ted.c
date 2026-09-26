@@ -68,6 +68,8 @@
 #include "video.h"
 #include "monitor.h"
 
+static void ted_tv_line_alarm_handler(CLOCK offset, void *data);
+
 
 ted_t ted;
 
@@ -88,6 +90,149 @@ void ted_change_timing(machine_timing_t *machine_timing, int bordermode)
     }
     /* this should go to ted_chip_model_init() incase we ever go that far */
     ted_color_update_palette(ted.raster.canvas);
+}
+
+/* Number of lines from the start of the line following the current one,
+   whose number is `ted.ted_raster_counter' + 1, to the start of line
+   `line', or -1 if the counter does not reach `line'.  The counter wraps
+   to 0 after the last line of the frame, or after 511 if it is already
+   beyond the last line.  */
+static int ted_lines_to(unsigned int line)
+{
+    unsigned int next = ted.ted_raster_counter + 1;
+    unsigned int wrap;
+
+    if (next == ted.screen_height || next == 512) {
+        next = 0;
+    }
+    wrap = next < ted.screen_height ? ted.screen_height : 512;
+    if (line >= next && line < wrap) {
+        return (int)(line - next);
+    }
+    if (line < ted.screen_height) {
+        return (int)(wrap - next + line);
+    }
+    return -1;
+}
+
+/* $FF07 bit 6 selects PAL or NTSC mode: the lines of a frame, the vertical
+   sync line and the clock rate.  The raster interrupt and the matrix DMA
+   scheduled after the end of the current line follow the new frame.  */
+void ted_set_ntsc_mode(int ntsc)
+{
+    CLOCK next_line_clk;
+    int lines;
+
+    ted_timing_set_mode(ntsc);
+
+    next_line_clk = ted.draw_clk;
+    if (ted.line_repeat) {
+        next_line_clk += ted.cycles_per_line;
+    }
+    if (ted.raster_irq_clk == CLOCK_MAX || ted.raster_irq_clk >= ted.draw_clk) {
+        lines = ted_lines_to(ted.raster_irq_line);
+        if (lines < 0) {
+            ted.raster_irq_clk = CLOCK_MAX;
+            alarm_unset(ted.raster_irq_alarm);
+        } else {
+            ted.raster_irq_clk = next_line_clk + TED_RASTER_IRQ_CYCLE
+                                 + (CLOCK)lines * ted.cycles_per_line;
+            alarm_set(ted.raster_irq_alarm, ted.raster_irq_clk);
+        }
+    }
+    /* After the last DMA line the next matrix DMA is on the first DMA line
+       of the next frame.  */
+    if (ted.fetch_clk >= ted.draw_clk
+        && (ted.ted_raster_counter < ted.first_dma_line
+            || ted.ted_raster_counter >= ted.last_dma_line)) {
+        lines = ted_lines_to(ted.first_dma_line);
+        ted.fetch_clk = next_line_clk + TED_FETCH_CYCLE
+                        + (CLOCK)lines * ted.cycles_per_line;
+        alarm_set(ted.raster_fetch_alarm, ted.fetch_clk);
+    }
+
+    plus4_set_ted_ntsc_mode(ntsc);
+}
+
+/* Move the TED clocks forward while frozen, in whole single clocks: FPGATED
+   latches the freeze bit at the end of a single clock, so the CPU keeps the
+   phase of its slots.  The line start and the counter events always move;
+   events due up to `ted.freeze_clk' happened before the freeze.  */
+void ted_freeze_update(void)
+{
+    CLOCK from, delta;
+
+    if (!ted.freeze || maincpu_clk <= ted.freeze_clk) {
+        return;
+    }
+    delta = (maincpu_clk - ted.freeze_clk) & ~(CLOCK)1;
+    if (delta == 0) {
+        return;
+    }
+    from = ted.freeze_clk;
+    ted.last_emulate_line_clk += delta;
+    ted.counter_clk += delta;
+    if (ted.draw_clk > from) {
+        ted.draw_clk += delta;
+    }
+    if (ted.fetch_clk != CLOCK_MAX && ted.fetch_clk > from) {
+        ted.fetch_clk += delta;
+    }
+    if (ted.raster_irq_clk != CLOCK_MAX && ted.raster_irq_clk > from) {
+        ted.raster_irq_clk += delta;
+    }
+    if (ted.counter_overflow_until > from) {
+        ted.counter_overflow_until += delta;
+    }
+    if (ted.clock_hold_end > from) {
+        ted.clock_hold_end += delta;
+    }
+    if (ted.fetch_clock_hold_end > from) {
+        ted.fetch_clock_hold_end += delta;
+    }
+    if (ted.refresh_clock_hold_end > from) {
+        ted.refresh_clock_hold_end += delta;
+    }
+    ted.freeze_clk += delta;
+}
+
+/* Return non-zero if the TED event at `*clk' waits for the end of the
+   freeze.  Its alarm is set again when TED runs.  */
+int ted_freeze_defers(const CLOCK *clk)
+{
+    if (!ted.freeze) {
+        return 0;
+    }
+    ted_freeze_update();
+    return *clk > ted.freeze_clk;
+}
+
+/* $FF07 bit 5 stops the horizontal and vertical counters, and with them
+   the display, DMA and raster interrupt, and the timers; the CPU runs in
+   single clock.  Clearing it continues from the same positions.  */
+void ted_set_freeze(int freeze)
+{
+    if (freeze) {
+        ted_counter_update(maincpu_clk);
+        ted.freeze = 1;
+        ted.freeze_clk = maincpu_clk;
+        ted_timer_freeze(1, 0);
+        ted.tv_line_clk = ted.draw_clk;
+        alarm_set(ted.tv_line_alarm, ted.tv_line_clk);
+    } else {
+        ted_freeze_update();
+        ted.freeze = 0;
+        alarm_unset(ted.tv_line_alarm);
+        /* The odd clock left after the last whole single clock runs.  */
+        ted_timer_freeze(0, maincpu_clk - ted.freeze_clk);
+        alarm_set(ted.raster_draw_alarm, ted.draw_clk);
+        if (ted.fetch_clk != CLOCK_MAX) {
+            alarm_set(ted.raster_fetch_alarm, ted.fetch_clk);
+        }
+        if (ted.raster_irq_clk != CLOCK_MAX) {
+            alarm_set(ted.raster_irq_alarm, ted.raster_irq_clk);
+        }
+    }
 }
 
 /* Return non-zero if TED's DMA request halts the CPU before its write at
@@ -111,6 +256,7 @@ int ted_dma_halts_cpu(CLOCK clk, int after_write)
 
 inline void ted_handle_pending_alarms(CLOCK num_write_cycles)
 {
+    ted_freeze_update();
     if (num_write_cycles != 0) {
         int f;
         int after_write;
@@ -239,10 +385,10 @@ static void ted_set_geometry(void)
 #endif
     raster_set_geometry(&ted.raster,
                         width, height, /* canvas dimensions */
-                        width, ted.screen_height, /* screen dimensions */
+                        width, ted.tv_height, /* screen dimensions */
                         TED_SCREEN_XPIX, TED_SCREEN_YPIX, /* gfx dimensions */
                         TED_SCREEN_TEXTCOLS, TED_SCREEN_TEXTLINES, /* text dimensions */
-                        ted.screen_leftborderwidth, ted.row_25_start_line + ted.screen_height - ted.vsync_line, /* gfx position */
+                        ted.screen_leftborderwidth, ted.row_25_start_line + ted.tv_height - ted.tv_vsync_line, /* gfx position */
                         0, /* gfx area doesn't move */
                         ted.first_displayed_line,
                         ted.last_displayed_line,
@@ -298,6 +444,8 @@ raster_t *ted_init(void)
 
     ted.raster_draw_alarm = alarm_new(maincpu_alarm_context, "TEDRasterDraw",
                                       ted_raster_draw_alarm_handler, NULL);
+    ted.tv_line_alarm = alarm_new(maincpu_alarm_context, "TEDTVLine",
+                                  ted_tv_line_alarm_handler, NULL);
 
     /* For now.  */
     /* ted_change_timing(NULL); */
@@ -333,6 +481,12 @@ void ted_reset(void)
     ted.bitmap_dirty = 0;
     memset(ted.bitmap_latched, 0, sizeof(ted.bitmap_latched));
     ted_timer_reset();
+
+    /* The counters restart here, so they run: a freeze ends.  The Kernal
+       writes $FF07 early in its TED initialization anyway.  */
+    ted.freeze = 0;
+    ted.regs[0x07] &= ~0x20;
+    alarm_unset(ted.tv_line_alarm);
 
     raster_reset(&ted.raster);
 
@@ -674,15 +828,68 @@ void ted_update_video_mode(unsigned int cycle)
 #endif
 }
 
+/* Draw the current TV line black: the TV scans it without a picture.
+   Changes for the next line do not affect it; apply them now and keep the
+   state they leave for the next line.  */
+static void ted_draw_black_line(void)
+{
+    raster_t *raster = &ted.raster;
+    unsigned int border_color;
+    int blank_enabled, open_left_border;
+
+    raster_changes_apply_all(raster->changes->next_line);
+    border_color = raster->border_color;
+    blank_enabled = raster->blank_enabled;
+    open_left_border = raster->open_left_border;
+    raster->border_color = 0;
+    raster->blank_this_line = 1;
+    raster_line_emulate(raster);
+    raster->border_color = border_color;
+    raster->blank_enabled = blank_enabled;
+    raster->open_left_border = open_left_border;
+}
+
+/* A frame shorter than the TV frame, for example in NTSC mode on a PAL
+   machine, starts the next frame early: the TV does not scan its last
+   lines, which stay black.  Draw them up to the end of the canvas frame;
+   the raster ends the canvas frame when its line wraps to 0.  */
+static void ted_draw_unscanned_lines(void)
+{
+    while (ted.raster.current_line != 0) {
+        ted_draw_black_line();
+    }
+}
+
+/* While TED is frozen it outputs no sync: the TV keeps scanning lines and
+   frames at its own rate, without a picture.  */
+static void ted_tv_line_alarm_handler(CLOCK offset, void *data)
+{
+    if (ted.tv_current_line < ted.tv_height) {
+        ted_draw_black_line();
+    }
+    ted.tv_current_line++;
+    vsync_do_end_of_line();
+    if (ted.tv_current_line >= ted.tv_height) {
+        vsync_do_vsync(ted.raster.canvas);
+        ted.tv_current_line = 0;
+    }
+    ted.tv_line_clk += ted.cycles_per_line;
+    alarm_set(ted.tv_line_alarm, ted.tv_line_clk);
+}
+
 /* Redraw the current raster line.  This happens at cycle TED_DRAW_CYCLE
    of each line.  */
 void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
 {
     int repeat;
 
+    if (ted_freeze_defers(&ted.draw_clk)) {
+        alarm_unset(ted.raster_draw_alarm);
+        return;
+    }
     ted_counter_update(ted.draw_clk);
 
-    if (ted.tv_current_line < ted.screen_height) {
+    if (ted.tv_current_line < ted.tv_height) {
         raster_line_emulate(&ted.raster);
     } else {
         /* Raster-counter writes can extend a frame beyond the canvas.  The
@@ -778,11 +985,10 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
 
     /* DO VSYNC if the raster_counter in the TED reached the VSYNC signal */
     /* Also do VSYNC if oversized screen reached a certain threashold, this will result in rolling screen just like on the real thing */
-    if (((signed int)(ted.tv_current_line - ted.screen_height) > 40) ||
+    if (((signed int)(ted.tv_current_line - ted.tv_height) > 40) ||
         (!repeat && ted.ted_raster_counter == ted.vsync_line)) {
-        if (ted.tv_current_line < ted.screen_height) {
-            ted.raster.current_line = 0;
-            raster_canvas_handle_end_of_frame(&ted.raster);
+        if (ted.tv_current_line < ted.tv_height) {
+            ted_draw_unscanned_lines();
         }
 
         /*log_debug(LOG_DEFAULT, "Vsync %d %d",ted.tv_current_line, ted.ted_raster_counter);*/

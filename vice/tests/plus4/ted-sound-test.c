@@ -134,6 +134,15 @@ static int16_t test_sample(void)
 #endif
 }
 
+/* Start a chip that has not run yet, as when sound is first opened.
+   Later initializations keep the state of the running chip. */
+static void power_on(unsigned int rate, unsigned int clock)
+{
+    memset(plus4_sound_data, 0, sizeof(plus4_sound_data));
+    memset(&snd, 0, sizeof(snd));
+    ted_sound_machine_init(NULL, rate, clock);
+}
+
 static uint64_t high_time(uint64_t time, uint64_t half_period)
 {
     uint64_t remainder = time % (2 * half_period);
@@ -151,8 +160,7 @@ static void tone(unsigned int rate, unsigned int clock, unsigned int freq,
     uint16_t high = voice ? 0x10 : 0x12;
     uint8_t control = voice ? 0x28 : 0x18;
 
-    memset(plus4_sound_data, 0, sizeof(plus4_sound_data));
-    ted_sound_machine_init(NULL, rate, clock);
+    power_on(rate, clock);
     ted_sound_machine_store(NULL, low, freq & 255);
     ted_sound_machine_store(NULL, high, freq >> 8);
     ted_sound_machine_store(NULL, 0x11, control | 0x80);
@@ -172,19 +180,32 @@ static void reopen_tone(void)
     unsigned int i;
     uint64_t time, current, previous = 0;
     uint64_t tick = 8 * 48000;
+    uint64_t half_period = (uint64_t)(1023 - 771) * tick;
 
+    /* A tone started at power on has its active counter at zero: the first
+       half-cycle takes 1024 ticks, the following ones use the frequency. */
+    power_on(48000, 1773447);
     ted_sound_machine_store(NULL, 0x0e, 771 & 255);
     ted_sound_machine_store(NULL, 0x12, 771 >> 8);
     ted_sound_machine_store(NULL, 0x11, 0x18);
-    ted_sound_machine_init(NULL, 48000, 1773447);
-    /* Init starts the active counter at zero.  Its first half-cycle takes
-       1024 ticks; subsequent ones must use the restored frequency. */
-    for (i = 1; i <= 48000; i++) {
+    for (i = 1; i <= 24000; i++) {
         time = (uint64_t)i * 1773447;
         current = time <= 1024 * tick ? 0 :
-                  high_time(time - 1024 * tick, (1023 - 771) * tick);
+                  high_time(time - 1024 * tick, half_period);
         assert(test_sample() == (int16_t)((current - previous) *
                                          volumeTable[0x18] / 1773447));
+        previous = current;
+    }
+    /* Reopening the output at the clock rate of NTSC mode on a PAL crystal
+       ($FF07 bit 6) continues the tone.  The counters run in CPU clocks;
+       a sample now lasts 2216809 / 48000 of them, so the tone is higher. */
+    ted_sound_machine_init(NULL, 48000, 2216809);
+    time = (uint64_t)24000 * 1773447 - 1024 * tick;
+    previous = high_time(time, half_period);
+    for (i = 1; i <= 24000; i++) {
+        current = high_time(time + (uint64_t)i * 2216809, half_period);
+        assert(test_sample() == (int16_t)((current - previous) *
+                                         volumeTable[0x18] / 2216809));
         previous = current;
     }
 }
@@ -195,8 +216,7 @@ static void frequency_write(void)
 
     /* Use exactly 16 counter ticks per sample to check a mid-period write.
        A frequency write changes the reload, not the running counter. */
-    memset(plus4_sound_data, 0, sizeof(plus4_sound_data));
-    ted_sound_machine_init(NULL, 8000, 1024000);
+    power_on(8000, 1024000);
     ted_sound_machine_store(NULL, 0x0e, 923 & 255);
     ted_sound_machine_store(NULL, 0x12, 923 >> 8);
     ted_sound_machine_store(NULL, 0x11, 0x98);
@@ -220,8 +240,7 @@ static void frequency_write(void)
    without restarting that divider or requiring another control write. */
 static void held_reload(void)
 {
-    memset(plus4_sound_data, 0, sizeof(plus4_sound_data));
-    ted_sound_machine_init(NULL, 48000, 144000);
+    power_on(48000, 144000);
     ted_sound_machine_store(NULL, 0x11, 0xb8);
     test_sample();
     ted_sound_machine_store(NULL, 0x0e, 0xfd);
@@ -248,8 +267,7 @@ static void held_noise(void)
     int seen_low = 0, seen_high = 0;
 
     for (i = 1; i < 32; i++) {
-        memset(plus4_sound_data, 0, sizeof(plus4_sound_data));
-        ted_sound_machine_init(NULL, 48000, 768000); /* Two ticks/sample. */
+        power_on(48000, 768000); /* Two ticks/sample. */
         ted_sound_machine_store(NULL, 0x0f, 0xfd);
         ted_sound_machine_store(NULL, 0x10, 3);
         ted_sound_machine_store(NULL, 0x11, 0xc8);
@@ -333,8 +351,7 @@ static void sampling_equivalence(void)
 
     for (r = 0; r < sizeof(rates) / sizeof(rates[0]); r++) {
         for (c = 0; c < sizeof(clocks) / sizeof(clocks[0]); c++) {
-            memset(plus4_sound_data, 0, sizeof(plus4_sound_data));
-            ted_sound_machine_init(NULL, rates[r], clocks[c]);
+            power_on(rates[r], clocks[c]);
             for (i = 0; i < 100000; i++) {
                 random = random * 1664525u + 1013904223u;
                 if (!(i % 17)) {
@@ -371,8 +388,7 @@ static void sub_sample_writes(void)
     int16_t buffer[4];
     CLOCK cycles;
 
-    memset(plus4_sound_data, 0, sizeof(plus4_sound_data));
-    ted_sound_machine_init(NULL, 48000, 768000); /* 16 CPU clocks/sample. */
+    power_on(48000, 768000); /* 16 CPU clocks/sample. */
     ted_sound_machine_store(NULL, 0x11, 0x98);
     cycles = 4;
     assert(cycle_samples(buffer, 4, &cycles) == 0 && cycles == 0);
@@ -394,8 +410,7 @@ static void cycle_equivalence(void)
     CLOCK cycles;
     int16_t actual[64], reference[64];
 
-    memset(plus4_sound_data, 0, sizeof(plus4_sound_data));
-    ted_sound_machine_init(NULL, 48000, 1773447);
+    power_on(48000, 1773447);
     for (i = 0; i < 100000; i++) {
         random = random * 1664525u + 1013904223u;
         ted_sound_machine_store(NULL, 0x0e + (random >> 16) % 5, random >> 24);
@@ -449,8 +464,7 @@ static void sound_snapshot(void)
     unsigned int i, length;
     int count;
 
-    memset(plus4_sound_data, 0, sizeof(plus4_sound_data));
-    ted_sound_machine_init(NULL, 48000, 1773447);
+    power_on(48000, 1773447);
     ted_sound_machine_store(NULL, 0x0f, 0xfd);
     ted_sound_machine_store(NULL, 0x10, 3);
     ted_sound_machine_store(NULL, 0x11, 0xc8);

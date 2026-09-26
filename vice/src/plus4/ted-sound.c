@@ -220,7 +220,6 @@ struct plus4_sound_s {
 };
 
 static struct plus4_sound_s snd;
-static int snapshot_loaded;
 #ifdef SOUND_SYSTEM_FLOAT
 static float *primary_buffer;
 #endif
@@ -401,7 +400,6 @@ int ted_sound_calculate_samples(sound_t **psid, int16_t *pbuf, int nr, int soc, 
     int count = 0;
     int16_t sample;
 
-    snapshot_loaded = 0;
 #ifdef SOUND_SYSTEM_FLOAT
     primary_buffer = pbuf;
 #endif
@@ -438,7 +436,6 @@ static int ted_sound_machine_calculate_samples(sound_t **psid, float *pbuf, int 
 {
     int i;
 
-    snapshot_loaded = 0;
     if (delta_t && !sidcart_enabled()) {
         memcpy(pbuf, primary_buffer, nr * sizeof(*pbuf));
         return nr;
@@ -454,7 +451,6 @@ static int ted_sound_machine_calculate_samples(sound_t **psid, int16_t *pbuf, in
     int i;
     int16_t volume;
 
-    snapshot_loaded = 0;
     if (delta_t && !sidcart_enabled()) {
         return nr;
     }
@@ -473,7 +469,9 @@ static int ted_sound_machine_init(sound_t *psid, int speed, int cycles_per_sec)
 {
     uint16_t addr;
     struct plus4_sound_s saved = snd;
-    int restore = snapshot_loaded;
+    /* Reopening the sound output or a new clock rate ($FF07 bit 6) does not
+       affect the chip: keep the state of a running chip.  */
+    int restore = saved.sample_rate != 0;
 
     DBG(("ted_sound_machine_init speed: %d cycles_per_sec: %d\n", speed, cycles_per_sec));
     memset(&snd, 0, sizeof(snd));
@@ -508,14 +506,12 @@ static int ted_sound_machine_init(sound_t *psid, int speed, int cycles_per_sec)
         }
         snd = saved;
     }
-    snapshot_loaded = 0;
     return 1;
 }
 
 static void ted_sound_machine_store(sound_t *psid, uint16_t addr, uint8_t val)
 {
     unsigned int freq;
-    snapshot_loaded = 0;
     switch (addr) {
         case 0x0e: /* voice0 freq lo */
             plus4_sound_data[0] = val;
@@ -653,12 +649,16 @@ int ted_sound_snapshot_write(snapshot_module_t *m)
 
 void ted_sound_snapshot_legacy(const uint8_t *regs)
 {
+    uint32_t sample_rate = snd.sample_rate;
+    uint32_t sample_length = snd.sample_length;
+
     memcpy(plus4_sound_data, regs, 5);
     plus4_sound_data[2] &= 3;
     plus4_sound_data[4] &= 3;
-    snapshot_loaded = 0;
-    if (snd.sample_rate) {
-        ted_sound_machine_init(NULL, snd.sample_rate, snd.sample_length);
+    /* Older modules contain no oscillator state.  */
+    memset(&snd, 0, sizeof(snd));
+    if (sample_rate) {
+        ted_sound_machine_init(NULL, sample_rate, sample_length);
     }
 }
 
@@ -716,10 +716,8 @@ int ted_sound_snapshot_read(snapshot_module_t *m)
         snd.voice0_cached_output = snd.volume | (sign0 & snd.voice0_output_enabled);
         snd.voice1_cached_output = snd.volume | (sign1 & snd.voice1_output_enabled)
                                   | (snd.noise_output & (snd.noise >> 1));
-        snapshot_loaded = 1;
         if (current_rate && (current_rate != snd.sample_rate || current_clock != snd.sample_length)) {
             ted_sound_machine_init(NULL, current_rate, current_clock);
-            snapshot_loaded = 1;
         }
     }
     return 0;

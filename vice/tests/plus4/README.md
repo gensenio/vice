@@ -642,3 +642,100 @@ scroll of 4 and sets 0 in the middle of the line. The four gap pixels of
 lines 99 and 100 must have the display colour; the previous build drew dark
 grey on line 100. Lines drawn from the cache still fill the gap with `$ff15`,
 as before.
+
+## PAL and NTSC mode ($ff07 bit 6)
+
+```sh
+sh tests/plus4/run-mode-test.sh /path/to/configured/build
+CFLAGS='-g -fsanitize=address,undefined' sh tests/plus4/run-mode-test.sh /path/to/configured/build
+```
+
+Register 7 bit 6 of the preliminary data sheet forces NTSC mode; the K1 test
+pin description adds that it forces "the internal clock division into the
+NTSC mode". TED divides its crystal by 10 in PAL mode (17.734475 MHz to
+1773447 VICE clocks per second) and by 8 in NTSC mode (14.31818 MHz to
+1789772); the dot clock is four VICE clocks in both, so a line keeps 114
+clocks. FPGATED switches end of screen (311/261), vertical sync, equalization
+and blanking lines with the register bit, and runs from a master clock of
+four times the dot clock. VICE ignored the bit: the video standard of the
+machine selected both the crystal and the frame.
+
+The crystal (the machine model) now fixes the TV and the canvas; the bit
+selects the frame (312 or 262 lines, vertical sync at 257 or 229) and the
+clock rate. NTSC mode on a PAL crystal runs at 2216809 clocks per second,
+PAL mode on an NTSC crystal at 1431818. Speed, sound, drive and ACIA timing
+follow the rate; the drives first run to the write at the old rate. TED
+powers up with the bit clear; the Kernal's TED table sets `$ff07` to `$08`
+(318004-05) or `$48` (318005-05, 364), and its later writes keep the bit.
+As before, `-pal` and `-ntsc` select a PAL or NTSC machine, like the VIC-II
+model in x64sc: changing the video standard replaces a Kernal selecting the
+other mode (318004-05 and the 232's 318004-01 write `$08`, 318005-05 and
+the 364 Kernal `$48`) with 318004-05 or 318005-05. Other Kernal images, and
+a `-kernal` given after the video standard, are kept. HNY2013 sets `$48` on a
+PAL machine and describes itself as running at 2.21 MHz; its line code
+lengthens each line to 143 clocks with `$ff1e` writes and builds a 312 line
+frame. VICE ran it at 1.77 MHz with a 312 line frame end; it now runs at
+2216809 clocks per second (1.25 times the rate measured in PAL mode) and the
+counter wraps after line 261.
+
+The raster interrupt and the matrix DMA scheduled across the end of the
+frame follow the new frame; a counter already beyond the last line counts
+to 511, as after a `$ff1d` write. The test checks the frame and sync lines
+of both modes, interrupts after the frame end, a line not reached in NTSC
+mode, a counter beyond the last line, a repeated line, the interrupt of the
+current line, the DMA of the next frame, the register handler, and a frame
+drawn in NTSC mode.
+
+A TED frame shorter than the TV frame starts the next TV frame early. The
+lines the TV does not scan are drawn black instead of keeping an earlier
+frame. Reopening or reconfiguring the sound output, which a new clock rate
+causes, keeps the TED oscillators running (`run-sound-test.sh` continues a
+tone at the NTSC mode rate). The SID cartridge's C64 clock mode computes its
+factor from the clock rates (1800 and 1750 as before, 2250 and 1400 for the
+other modes). Not modelled: the chroma of the mode (a PAL TV shows NTSC
+mode in black and white, as in HNY2013's screenshot), the vertical hold of
+the TV, and tape pulses, which the datasette counts in clocks rather than
+in time.
+
+## Freeze ($ff07 bit 5)
+
+```sh
+sh tests/plus4/run-freeze-test.sh /path/to/configured/build
+CFLAGS='-g -fsanitize=address,undefined' sh tests/plus4/run-freeze-test.sh /path/to/configured/build
+python3 tests/plus4/run-freeze-test.py /path/to/xplus4
+```
+
+Register 7 of the preliminary data sheet: "Setting freeze high stops TED from
+incrementing the horizontal position, the timers and the vertical position.
+The system is forced into single clock and system refresh of dynamic rams."
+FPGATED implements the bit (`stop`) the same way: the horizontal counter
+stops, and with it every horizontal event, the vertical counter, DMA and the
+raster interrupt; the three timers stop; single clock is forced; the refresh
+counter advances every single clock. It latches the bit at the end of a
+single clock (`stopreg`), so the counters stop for whole single clocks and
+the CPU keeps the phase of its slots. VICE stored the bit and ignored it.
+
+While the bit is set, VICE now moves the TED clocks forward in whole single
+clocks: the line start, the counter events, the next line, DMA and raster
+interrupt events, the `$ff1e` overflow and the held clock flip-flops. Events
+due before the freeze still happen; the later ones wait and their alarms are
+set again when the bit is cleared. Reads of `$ff1c` to `$ff1e` return the
+stopped position. The timers keep their counts; a timer started while
+frozen, or an underflow due at the freeze, waits as well. The CPU runs in
+single clock, as with `$ff13` bit 1. Sound, which runs from the single clock,
+continues. Without sync the TV keeps scanning lines and frames at its own
+rate; they are drawn black. Snapshots keep the frozen state. A machine reset
+restarts the counters, so it ends a freeze; the Kernal writes `$ff07` early
+in its TED initialization anyway. Not modelled: the refresh addresses on the
+bus, and what a TV shows of the constant signal of a frozen TED.
+
+The unit test checks the clocks after 1001 frozen clocks (1000 moved), the
+frozen position of `$ff1e`, a line end that waits, an event due before the
+freeze, the restart and the timers' odd clock, single clock compared with
+`$ff13` bit 1, and the free-running TV lines and frame. The timer test
+pauses and resumes all three timers, through a snapshot, with a timer
+underflow due at the freeze. The program freezes on line 220, loops about
+10000 CPU cycles, which would otherwise pass 90 lines, and reads the
+counters, timer 1 and the raster flag of line 222 before, during and after
+the freeze. The previous build moved to line 6 of the next frame during the
+loop. A snapshot saved inside the frozen loop resumes to the same results.

@@ -293,6 +293,10 @@ static const tape_init_t tapeinit = {
 static log_t plus4_log = LOG_DEFAULT;
 static machine_timing_t machine_timing;
 
+/* Video standard of the crystal: 17.734475 MHz for PAL, 14.31818 MHz for
+   NTSC.  */
+static int crystal_standard = MACHINE_SYNC_PAL;
+
 /*
 static long cycles_per_sec = PLUS4_PAL_CYCLES_PER_SEC;
 static long cycles_per_rfsh = PLUS4_PAL_CYCLES_PER_RFSH;
@@ -996,30 +1000,29 @@ void machine_get_line_cycle(unsigned int *line, unsigned int *cycle, int *half_c
     *half_cycle = (int)-1;
 }
 
-/* NOTE: power-grid freq is not used in the plus4 */
-void machine_change_timing(int timeval, int powerfreq, int border_mode)
+/* Set the timing of the TED mode selected by $FF07 bit 6.  TED divides
+   the crystal of the machine by 10 in PAL mode and by 8 in NTSC mode, so
+   the clock rate depends on both, while a line has 114 clocks in both.  */
+static void plus4_set_timing(int ntsc)
 {
-    switch (timeval) {
-        case MACHINE_SYNC_PAL:
-            machine_timing.cycles_per_sec = PLUS4_PAL_CYCLES_PER_SEC;
-            machine_timing.cycles_per_rfsh = PLUS4_PAL_CYCLES_PER_RFSH;
-            machine_timing.rfsh_per_sec = PLUS4_PAL_RFSH_PER_SEC;
-            machine_timing.cycles_per_line = PLUS4_PAL_CYCLES_PER_LINE;
-            machine_timing.screen_lines = PLUS4_PAL_SCREEN_LINES;
-            machine_timing.power_freq = powerfreq;
-            break;
-        case MACHINE_SYNC_NTSC:
-            machine_timing.cycles_per_sec = PLUS4_NTSC_CYCLES_PER_SEC;
-            machine_timing.cycles_per_rfsh = PLUS4_NTSC_CYCLES_PER_RFSH;
-            machine_timing.rfsh_per_sec = PLUS4_NTSC_RFSH_PER_SEC;
-            machine_timing.cycles_per_line = PLUS4_NTSC_CYCLES_PER_LINE;
-            machine_timing.screen_lines = PLUS4_NTSC_SCREEN_LINES;
-            machine_timing.power_freq = powerfreq;
-            break;
-        default:
-            log_error(plus4_log, "Unknown machine timing.");
+    if (crystal_standard == MACHINE_SYNC_NTSC) {
+        machine_timing.cycles_per_sec = ntsc ? PLUS4_NTSC_CYCLES_PER_SEC
+                                        : PLUS4_NTSC_CRYSTAL_PAL_CYCLES_PER_SEC;
+    } else {
+        machine_timing.cycles_per_sec = ntsc ? PLUS4_PAL_CRYSTAL_NTSC_CYCLES_PER_SEC
+                                        : PLUS4_PAL_CYCLES_PER_SEC;
     }
+    machine_timing.cycles_per_line = PLUS4_PAL_CYCLES_PER_LINE;
+    machine_timing.screen_lines = ntsc ? PLUS4_NTSC_SCREEN_LINES
+                                  : PLUS4_PAL_SCREEN_LINES;
+    machine_timing.cycles_per_rfsh = machine_timing.screen_lines
+                                     * machine_timing.cycles_per_line;
+    machine_timing.rfsh_per_sec = (double)machine_timing.cycles_per_sec
+                                  / (double)machine_timing.cycles_per_rfsh;
+}
 
+static void plus4_set_machine_parameters(void)
+{
     vsync_set_machine_parameter(machine_timing.rfsh_per_sec,
                                 machine_timing.cycles_per_sec);
     sound_set_machine_parameter(machine_timing.cycles_per_sec,
@@ -1031,10 +1034,42 @@ void machine_change_timing(int timeval, int powerfreq, int border_mode)
 #ifdef HAVE_MOUSE
     mouse_set_machine_parameter(machine_timing.cycles_per_sec);
 #endif
+}
+
+/* NOTE: power-grid freq is not used in the plus4 */
+void machine_change_timing(int timeval, int powerfreq, int border_mode)
+{
+    switch (timeval) {
+        case MACHINE_SYNC_PAL:
+        case MACHINE_SYNC_NTSC:
+            crystal_standard = timeval;
+            break;
+        default:
+            log_error(plus4_log, "Unknown machine timing.");
+    }
+    machine_timing.power_freq = powerfreq;
+
+    /* TED powers up in PAL mode; the NTSC Kernal selects NTSC mode.  */
+    plus4_set_timing(0);
+    plus4_set_machine_parameters();
 
     ted_change_timing(&machine_timing, border_mode);
 
     machine_trigger_reset(MACHINE_RESET_MODE_POWER_CYCLE);
+}
+
+/* $FF07 bit 6 changed the TED mode.  */
+void plus4_set_ted_ntsc_mode(int ntsc)
+{
+    long cycles_per_sec = machine_timing.cycles_per_sec;
+
+    plus4_set_timing(ntsc);
+    if (machine_timing.cycles_per_sec == cycles_per_sec) {
+        return;
+    }
+    /* The drives run up to this clock at the previous rate.  */
+    drive_cpu_execute_all(maincpu_clk);
+    plus4_set_machine_parameters();
 }
 
 /* ------------------------------------------------------------------------- */

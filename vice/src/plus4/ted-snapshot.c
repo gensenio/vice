@@ -34,6 +34,7 @@
 #include "interrupt.h"
 #include "log.h"
 #include "mem.h"
+#include "plus4.h"
 #include "snapshot.h"
 #include "raster-snapshot.h"
 #include "raster-sprite-status.h"
@@ -41,6 +42,7 @@
 #include "ted-irq.h"
 #include "ted-snapshot.h"
 #include "ted-sound.h"
+#include "ted-timing.h"
 #include "ted-timer.h"
 #include "ted.h"
 #include "tedtypes.h"
@@ -114,6 +116,9 @@ int ted_snapshot_write_module(snapshot_t *s)
     snapshot_module_t *m;
 
     /* FIXME: Dispatch all events?  */
+
+    /* Save the clocks of a frozen TED as they stand now.  */
+    ted_freeze_update();
 
     m = snapshot_module_create (s, snap_module_name, SNAP_MAJOR, SNAP_MINOR);
     if (m == NULL) {
@@ -264,6 +269,12 @@ int ted_snapshot_read_module(snapshot_t *s)
 
     /* FIXME: initialize changes?  */
 
+    /* A freeze of the running machine ends; $FF07 bit 5 of the snapshot
+       freezes again once everything is restored.  */
+    ted.freeze = 0;
+    alarm_unset(ted.tv_line_alarm);
+    ted_timer_freeze(0, 0);
+
     if (0
         || SMR_CLOCK(m, &ted.last_emulate_line_clk) < 0
         /* AllowBadLines */
@@ -306,6 +317,10 @@ int ted_snapshot_read_module(snapshot_t *s)
         || SMR_B_INT(m, &ted.irq_status) < 0) {
         goto fail;
     }
+
+    /* The frame and the clock rate follow the mode of $FF07 bit 6.  */
+    ted_timing_set_mode((ted.regs[0x07] & 0x40) != 0);
+    plus4_set_ted_ntsc_mode((ted.regs[0x07] & 0x40) != 0);
 
     /* Sanity check the current raster line and the current raster cycle */
     DBG(("TED read snapshot at clock: %d cycle: %d (%d) tedline: %d (%d) rasterline: %d",
@@ -504,6 +519,9 @@ int ted_snapshot_read_module(snapshot_t *s)
         ted.clock_hold_end = ted.refresh_clock_hold_end;
     }
     ted_delay_resync();
+    if (ted.regs[0x07] & 0x20) {
+        ted_set_freeze(1);
+    }
 
     raster_force_repaint(&ted.raster);
     DBG(("TED: snapshot loaded."));

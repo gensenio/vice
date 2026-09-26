@@ -246,6 +246,58 @@ int main(void)
         m.size = 3;
         assert(ted_timer_snapshot_read(&m) < 0);
     }
+    /* $FF07 bit 5 stops the counting: the counts stay during the freeze,
+       also of a timer started while frozen, and count again after it. */
+    ted_timer_reset();
+    {
+        unsigned int before[3];
+        CLOCK resume;
+        snapshot_module_t m = { { 0 }, 0, 0 };
+
+        for (i = 0; i < 3; i++) {
+            start(i, 1000);
+            before[i] = irqs[i];
+        }
+        advance(200);
+        ted_timer_freeze(1, 0);
+        advance(5001);
+        for (i = 0; i < 3; i++) {
+            assert(count(i) == 900);
+            assert(irqs[i] == before[i]);
+        }
+        /* The frozen counts survive a snapshot round trip. */
+        assert(ted_timer_snapshot_write(&m) == 0);
+        assert(ted_timer_snapshot_read(&m) == 0);
+        advance(1000);
+        for (i = 0; i < 3; i++) {
+            assert(count(i) == 900);
+        }
+        /* One clock runs after the last whole single clock. */
+        ted_timer_freeze(0, 1);
+        resume = maincpu_clk - 1;
+        assert(count(0) == 899);
+        advance(1799);
+        for (i = 0; i < 3; i++) {
+            assert(irqs[i] == before[i] + 1);
+            assert(irq_clock[i] == resume + 1800);
+        }
+        /* An underflow due at the freeze reloads the counter, which then
+           waits: it counted one clock before the freeze. */
+        ted_timer_reset();
+        before[1] = irqs[1];
+        start(1, 10);
+        maincpu_clk += 21;
+        ted_timer_freeze(1, 0);
+        advance(0);
+        assert(irqs[1] == before[1] + 1 && irq_clock[1] == maincpu_clk - 1);
+        advance(3000);
+        assert(count(1) == 0xffff);
+        assert(irqs[1] == before[1] + 1);
+        ted_timer_freeze(0, 0);
+        advance(4);
+        assert(count(1) == 0xfffd);
+    }
+
     puts("TED timer regression tests passed");
     return 0;
 }

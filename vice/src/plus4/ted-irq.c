@@ -237,6 +237,10 @@ void ted_irq_next_frame(void)
 
 static void ted_irq_alarm_handler(CLOCK offset, void *data)
 {
+    if (ted_freeze_defers(&ted.raster_irq_clk)) {
+        alarm_unset(ted.raster_irq_alarm);
+        return;
+    }
     ted_irq_raster_set(ted.raster_irq_clk);
     ted_irq_next_frame();
 }

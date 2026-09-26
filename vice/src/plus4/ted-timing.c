@@ -57,7 +57,7 @@ void ted_timing_set(machine_timing_t *machine_timing, int border_mode)
 
     switch (mode) {
         case MACHINE_SYNC_NTSC:
-            ted.screen_height = TED_NTSC_SCREEN_HEIGHT;
+            ted.tv_height = TED_NTSC_SCREEN_HEIGHT;
             switch (border_mode) {
                 default:
                 case TED_NORMAL_BORDERS:
@@ -94,11 +94,11 @@ void ted_timing_set(machine_timing_t *machine_timing, int border_mode)
             ted.first_dma_line = TED_NTSC_FIRST_DMA_LINE;
             ted.last_dma_line = TED_NTSC_LAST_DMA_LINE;
             ted.offset = TED_NTSC_OFFSET;
-            ted.vsync_line = TED_NTSC_VSYNC_LINE;
+            ted.tv_vsync_line = TED_NTSC_VSYNC_LINE;
             break;
         case MACHINE_SYNC_PAL:
         default:
-            ted.screen_height = TED_PAL_SCREEN_HEIGHT;
+            ted.tv_height = TED_PAL_SCREEN_HEIGHT;
             switch (border_mode) {
                 default:
                 case TED_NORMAL_BORDERS:
@@ -135,8 +135,23 @@ void ted_timing_set(machine_timing_t *machine_timing, int border_mode)
             ted.first_dma_line = TED_PAL_FIRST_DMA_LINE;
             ted.last_dma_line = TED_PAL_LAST_DMA_LINE;
             ted.offset = TED_PAL_OFFSET;
-            ted.vsync_line = TED_PAL_VSYNC_LINE;
+            ted.tv_vsync_line = TED_PAL_VSYNC_LINE;
             break;
+    }
+    ted_timing_set_mode((ted.regs[0x07] & 0x40) != 0);
+}
+
+/* Set the frame of the mode selected by $FF07 bit 6.  The crystal of the
+   machine does not change it: TED divides the crystal by 10 in PAL mode
+   and by 8 in NTSC mode, 114 clocks per line in both.  */
+void ted_timing_set_mode(int ntsc)
+{
+    if (ntsc) {
+        ted.screen_height = TED_NTSC_SCREEN_HEIGHT;
+        ted.vsync_line = TED_NTSC_VSYNC_LINE;
+    } else {
+        ted.screen_height = TED_PAL_SCREEN_HEIGHT;
+        ted.vsync_line = TED_PAL_VSYNC_LINE;
     }
 }
 
@@ -157,7 +172,8 @@ void ted_delay_resync(void)
    lines with fetches) or its DRAM refresh clock is on.  Both are
    flip-flops, switched when the horizontal counter reaches their first
    and last slots: the fetch clock from slot 4 to 91, the refresh clock
-   from 92 to 100.  */
+   from 92 to 100.  $FF13 bit 1 and the freeze ($FF07 bit 5) force single
+   clock.  */
 #define TED_FETCH_CLOCK_ON      4U
 #define TED_FETCH_CLOCK_OFF     92U
 #define TED_REFRESH_CLOCK_ON    92U
@@ -186,7 +202,7 @@ static int ted_cpu_slot(CLOCK clk, unsigned int cycle)
 {
     int single;
 
-    single = ted.fastmode == 0
+    single = ted.fastmode == 0 || ted.freeze
              || (ted.character_fetch_on && ted_fetch_clock(clk, cycle))
              || ted_refresh_clock(clk, cycle);
     return !single || (cycle & 1);
@@ -312,11 +328,13 @@ void ted_delay_clk(void)
     if (maincpu_clk <= old_maincpu_clk) {
         return;
     }
+    /* While frozen the CPU runs in single clock; the counters stay.  */
+    ted_freeze_update();
     if (old_maincpu_clk < ted.clock_hold_end && ted_delay_clk_held()) {
         return;
     }
 
-    if (ted.fastmode == 0) {
+    if (ted.fastmode == 0 || ted.freeze) {
         diff = maincpu_clk - old_maincpu_clk - ((old_cycle & 1) ^ 1);
         ted_stretch_cpu_clk(diff);
     } else {

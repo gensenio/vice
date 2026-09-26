@@ -349,6 +349,16 @@ inline static void ted07_store(uint8_t value)
         ted_update_memory_ptrs(cycle);
     }
 
+    /* Bit 6 selects NTSC mode.  */
+    if ((old_value ^ value) & 0x40) {
+        ted_set_ntsc_mode((value & 0x40) != 0);
+    }
+
+    /* Bit 5 freezes the counters and the timers.  */
+    if ((old_value ^ value) & 0x20) {
+        ted_set_freeze((value & 0x20) != 0);
+    }
+
     ted_update_video_mode(cycle);
 }
 
@@ -933,7 +943,7 @@ inline static uint8_t ted1a1b_read(uint16_t addr)
 
 inline static uint8_t ted1c1d_read(uint16_t addr)
 {
-    unsigned int tmp = TED_RASTER_Y(maincpu_clk);
+    unsigned int tmp = TED_RASTER_Y(TED_COUNTER_CLK);
 
     if (addr == 0x1c) {
         return (((tmp & 0x100) >> 8) | 0xfe) & 0xff;

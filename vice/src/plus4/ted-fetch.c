@@ -205,6 +205,11 @@ void ted_fetch_alarm_handler(CLOCK offset, void *data)
     CLOCK sub;
     CLOCK write_offset;
 
+    if (ted_freeze_defers(&ted.fetch_clk)) {
+        alarm_unset(ted.raster_fetch_alarm);
+        return;
+    }
+
     /* This kludgy thing is used to emulate the behavior of the 6510 when BA
        goes low.  When BA goes low, every read access stops the processor
        until BA is high again; write accesses happen as usual instead.  */

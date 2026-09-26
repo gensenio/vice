@@ -37,6 +37,7 @@
 #include "export.h"
 #include "joyport.h"
 #include "keyboard.h"
+#include "machine.h"
 #include "plus4.h"
 #include "resources.h"
 #include "sid.h"
@@ -55,14 +56,27 @@ int sidcart_clock = 1;
 
 /* ------------------------------------------------------------------------- */
 
+/* C64 clock rates of the SID in C64 clock mode.  */
+#define SIDCART_C64_PAL_CYCLES_PER_SEC   985248
+#define SIDCART_C64_NTSC_CYCLES_PER_SEC  1022730
+
 static int sidcart_sound_machine_init(sound_t *psid, int speed, int cycles_per_sec)
 {
+    int video = MACHINE_SYNC_PAL;
+    int c64_cycles_per_sec;
+
     if (!sidcart_clock) {
-        if (cycles_per_sec == PLUS4_PAL_CYCLES_PER_SEC) {
-            return sid_sound_machine_init_vbr(psid, speed, cycles_per_sec, 1800);
-        } else {
-            return sid_sound_machine_init_vbr(psid, speed, cycles_per_sec, 1750);
-        }
+        /* The Plus/4 clock rate also depends on the TED mode ($FF07 bit 6),
+           the C64 clock only on the video standard of the machine.  The
+           factor is the ratio of the two clocks in thousandths.  */
+        resources_get_int("MachineVideoStandard", &video);
+        c64_cycles_per_sec = video == MACHINE_SYNC_NTSC
+                             ? SIDCART_C64_NTSC_CYCLES_PER_SEC
+                             : SIDCART_C64_PAL_CYCLES_PER_SEC;
+        return sid_sound_machine_init_vbr(psid, speed, cycles_per_sec,
+                                          (int)(((uint64_t)cycles_per_sec * 1000
+                                                 + c64_cycles_per_sec / 2)
+                                                / c64_cycles_per_sec));
     } else {
         return sid_sound_machine_init(psid, speed, cycles_per_sec);
     }

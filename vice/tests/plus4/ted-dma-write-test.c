@@ -25,6 +25,11 @@ void alarm_log_too_many_alarms(void)
     abort();
 }
 
+void alarm_unset(alarm_t *alarm)
+{
+    alarm->pending_idx = -1;
+}
+
 void ted_counter_update(CLOCK clk)
 {
 }
@@ -166,6 +171,7 @@ int main(void)
        colours and request character DMA at the line boundary. */
     setup();
     ted.screen_height = 312;
+    ted.tv_height = 312;
     ted.first_dma_line = 0;
     ted.last_dma_line = 203;
     ted.allow_bad_lines = 1;
