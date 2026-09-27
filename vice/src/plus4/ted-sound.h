@@ -36,6 +36,8 @@ struct snapshot_module_s;
 int ted_sound_snapshot_write(struct snapshot_module_s *m);
 int ted_sound_snapshot_read(struct snapshot_module_s *m);
 void ted_sound_snapshot_legacy(const uint8_t *regs);
+int ted_sound_snapshot_write_state(struct snapshot_module_s *m);
+int ted_sound_snapshot_read_state(struct snapshot_module_s *m);
 
 void ted_sound_store(uint16_t addr, uint8_t value);
 uint8_t ted_sound_read(uint16_t addr);
