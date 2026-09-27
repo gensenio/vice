@@ -292,7 +292,7 @@ assertion fails with the preceding implementation. Existing comparator phase
 and read-modify-write timing are retained, not independently validated against
 silicon by this test.
 
-## TED audio counters and sampling
+## TED audio voices
 
 ```sh
 tests/plus4/run-sound-test.sh /path/to/configured/build
@@ -300,73 +300,95 @@ CFLAGS='-O1 -g -fsanitize=address,undefined' tests/plus4/run-sound-test.sh /path
 CFLAGS='-O1 -g -fsanitize=address,undefined -DSOUND_SYSTEM_FLOAT' tests/plus4/run-sound-test.sh /path/to/configured/build
 ```
 
-The test compiles production `ted-sound.c` and compares both oscillators with
-analytic square-wave integrals for PAL/NTSC clocks at 8, 44.1, 48, 96 and
-384 kHz. This covers low tones, audible tones, multiple transitions per
-sample and the `$3ff` wraparound. It also checks deferred frequency reloads,
-audio reopen with a saved tone/digital level, volume saturation, square-wave
-priority over noise, and split-buffer/stereo/float consistency. The preceding
-implementation fails the analytic waveform test. No other emulator is used
-as an oracle.
-
 [Commodore's preliminary data sheet](https://www.pagetable.com/docs/ted/TED%207360R0%20Preliminary%20Data%20Sheet.pdf)
-defines controls in its Sound section and registers 14–18. Its preliminary
-frequency formula is superseded here by the counter description in
-[TLC's TED Sound Generation Internals](https://plus4world.powweb.com/plus4encyclopedia/500244):
-quarter-single-clock ticks, `1023-r` half-periods and the special `$3ff` case.
-The FPGA reproduction also uses a ten-bit counter and frequency-plus-one
-reload; it is corroboration rather than an original-chip measurement.
+defines the controls in its Sound section and registers 14-18;
+[TLC's TED Sound Generation Internals](https://plus4world.powweb.com/plus4encyclopedia/500244)
+gives the counters: quarter-single-clock ticks, `1023-r` ticks for each half
+period and 1024 for `$3ff`. The voices now follow FPGATED's counters, which
+plus4emu's agree with:
 
-The generator integrates its output over each sample and batches counter ticks
-when no transition occurs. This avoids losing ultrasonic transitions and
-rounded-step drift without look-ahead buffering. Box integration is not ideal
-band-limited resampling. Held reload is checked with a frequency write between
-counter clocks, including divider phase on release. Noise held at `$3fe` must
-retain either output level and must not advance on a control write.
+- A counter counts up to `$3ff` and then loads the frequency + 1; the state
+  changes when the counter reaches `$3ff`. After register 17 bit 7, which
+  holds the counters at the reload value and clears the states (high
+  output), the first half period is one tick shorter than before.
+- With frequency `$3fe` the counter finishes its count, changes the state
+  once more and then stays at `$3ff`: the state holds, low or high, as TLC
+  observed ([TED sound experiments](https://plus4world.powweb.com/ma/1550)).
+  VICE used to force the output high at once.
+- A state held for 188416 ticks (0.85 s) clears, so the output goes high:
+  plus4emu (`soundDecayCycles`) does this for both voices, FPGATED
+  (`watchdog`, taken from plus4emu) only for the first, its second reset not
+  being connected. The noise register keeps its bit.
+- The noise register shifts on each state change of voice 1 and takes the
+  XNOR of bits 7, 5, 4 and 1 as its new bit and output; register 17 bit 7
+  clears it. VICE's XOR register from `$ff` gave the inverted sequence, one
+  step late; plus4emu's inverted XOR register gives the same output as
+  FPGATED. It runs 255 steps, 127 ones.
 
-The level test uses the DC measurements in
-[TLC's 2000 hardware report](https://plus4world.powweb.com/ma/1550), subtracting
-idle level 31, averaging the two single voices, and normalizing the measured
-dual-voice peak 15674 to 19976. This is an empirical mean-level model; it does
-not reproduce PWM edge timing or characterize every board revision.
-The noise feedback/clock and immediate-high tone approximation at `$3fe`
-remain unverified. The original sample-path tests do not cover sub-sample writes or analogue
-decay. Native cycle-timed writes are covered by the tests below.
+FPGATED clocks the second voice two single clocks after the first, and
+plus4emu counts the first half period after register 17 bit 7 in full; these
+differences of a tick or less are not modelled. Nor is plus4emu's low output
+while register 17 bit 7 holds a `$3fe` counter, which FPGATED does not have.
 
-The audio sampling optimization is checked against a deliberately simple
-per-tick integrator over one million samples, with deterministic register
-changes across PAL/NTSC and five sample rates. Every sample and the complete
-sound state must agree, including held reload, noise and divider phase.
-The production path precomputes the sample quotient/remainder and integrates
-between counter overflows; it must not skip muted oscillators or noise events.
+The test runs the voices clock by clock, with a sample rate of 1 and a sample
+of 2^30 clocks, and checks the output level at every clock against the
+periods for frequencies 0, 800, 1000, 1021 and 1023 of both voices, across a
+reopen with another clock rate, a frequency write within a count, frequency
+writes while held, holds at both levels and of the noise, the decay of either
+voice at its tick, the noise sequence, and the levels of TLC's DC
+measurements with saturation and square-over-noise priority. The level table
+subtracts the idle level 31, averages the two single voices and normalizes
+the dual-voice peak 15674 to 19976; FPGATED's pulse widths, 2 volume - 1
+dots of 32, agree with these ratios within the analogue differences.
 
-## Cycle-timed TED audio and snapshots
+## TED audio output
+
+The output level changes in steps, at the ticks of the voices and at register
+writes, at their CPU clocks. The output averaged it over each sample, which
+left the harmonics above half the sample rate aliased into the audio band
+about 20 dB down. Now each step is spread over 48 output samples by the step
+response of a low-pass filter at half the sample rate, tabulated for 64
+positions within a sample and interpolated between them. The filter is the
+minimum phase version of a Kaiser windowed sinc (beta 8), computed once
+through its cepstrum when sound opens (8 ms): the same magnitude response,
+passband ripple 0.001 dB and stopband -88 dB, but a step reaches half its
+level 2.7 samples after it (56 us at 48 kHz) instead of 24 with the linear
+phase sinc; the phase differs near the cutoff. Rendered at 48 kHz, audible
+aliases of a 440 Hz, a 4819 Hz and a 55420 Hz tone fell from -31, -20 and
+-13 dB to -74, -74 and -81 dB; the 55420 Hz tone gave an audible 7420 Hz
+tone before. The ticks between changes are still counted together: 3 seconds
+of a tone take 2 ms of CPU for the lowest tone up to 30 ms for 55 kHz, with
+about 110000 steps a second, against 2 to 5 ms before; 68 s of Alpharay's
+music take 67 ms, against 55 ms.
+
+The board couples SND to its audio amplifier through R10 and C18 into R11 and
+R12 (Plus/4 schematic 310164, sheet 2): a high-pass filter with a time
+constant of (1 kOhm + 12 kOhm || 10 kOhm) * 10 uF, 64.5 ms. It removes the DC
+level the output used to keep (a tone's mean at 4658) and the jumps it made
+when sounds started or stopped. C19's low-pass pole near 70 kHz is not
+modelled.
+
+The test checks that every row of the step table adds up to one, a step at
+two positions within a sample: silent before, 90% after four samples,
+centred less than three samples after it and moving with its position within
+0.01 sample, then decaying to 1 / e of the level after one time constant, the aliases of the 4819 Hz and 55420 Hz tones below -60 dB,
+and the batched run against one tick at a time with random writes at four
+sample rates.
 
 With the SID cartridge disabled, the first mixer slot delegates timing to
-TED instead of running a disabled SID engine for its sample count. TED keeps
-the integral of a partial sample across calls: two volume writes within one
-sample are no longer collapsed to its final level. The enabled SID cartridge
-keeps its existing path; no reSID engine code is modified. Float mixing copies
-the native samples into the TED slot so its normal mixing metadata applies.
+TED instead of running a disabled SID engine for its sample count; TED keeps
+the unfinished sample across calls so writes act at their CPU cycle. The
+enabled SID cartridge keeps its existing path. RMW stores write the
+unmodified value at the preceding cycle and the final value at the CPU clock.
 
-Tests cover a four-cycle pulse at each end of one 16-cycle sample, randomized
-cycle chunks with register writes against a per-tick integrator, and output
-capacity exhaustion including the fractional CPU cycle. RMW stores check the
-unmodified value at the preceding cycle and the final write at the CPU clock.
-
-TED snapshot version 1.8 appends the five sound registers, both active
-counters and signs, noise register/output, sample clock/rate, divider phase,
-partial integral/length and fractional cycle credit. Derived caches are
-rebuilt. Truncated and invalid states are rejected; loading 1.7 still reads
-the counter-event fields before falling back to register-only sound restore.
-Old snapshots cannot recover sound state that they never saved. Loading at a
-different output rate preserves oscillator/divider phase but discards the old
-host-rate partial sample. Tests compare continued samples and state after a
-round trip and a lazy audio-device open, and reject every truncation point.
-
-These changes do not establish the analogue PWM transfer function, exact
-noise clock/phase, relative voice clock phase, or the decay time at `$3fe`.
-The existing approximation for those unresolved hardware details is retained.
+TED snapshot 1.8 saves the sound registers, counters, states, noise register,
+sample clock and rate, divider phase, position within the sample and the
+fractional cycle; version 1.13 appends the ticks since the last state change
+of each voice and the output stage, which applies at the sample rate it was
+saved at. Tests compare continued samples and state after a round trip and a
+reopen, the phase kept at another rate, and reject every truncation point.
+Saved, loaded and saved again during Alpharay's music, the TED module is
+identical.
 
 ## HSP DMA position reload
 
@@ -690,7 +712,7 @@ A TED frame shorter than the TV frame starts the next TV frame early. The
 lines the TV does not scan are drawn black instead of keeping an earlier
 frame. Reopening or reconfiguring the sound output, which a new clock rate
 causes, keeps the TED oscillators running (`run-sound-test.sh` continues a
-tone at the NTSC mode rate). The SID cartridge's C64 clock mode computes its
+tone across a new clock rate). The SID cartridge's C64 clock mode computes its
 factor from the clock rates (1800 and 1750 as before, 2250 and 1400 for the
 other modes). Not modelled: the chroma of the mode (a PAL TV shows NTSC
 mode in black and white, as in HNY2013's screenshot), the vertical hold of

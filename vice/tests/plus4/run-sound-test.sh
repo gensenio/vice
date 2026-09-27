@@ -10,5 +10,5 @@ ${CC:-cc} -DHAVE_CONFIG_H -I"$config_build/src" -I"$root/src" -I"$root/src/plus4
     -I"$root/src/arch/headless" -I"$root/src/arch/shared" \
     -Wall -Wextra -Wno-unused-parameter -ffunction-sections -fdata-sections \
     ${CFLAGS:-} "$root/tests/plus4/ted-sound-test.c" \
-    -Wl,--gc-sections -o "$build/ted-sound-test"
+    -Wl,--gc-sections -lm -o "$build/ted-sound-test"
 "$build/ted-sound-test"

@@ -108,7 +108,7 @@ void ted_snapshot_prepare(void)
 
 static char snap_module_name[] = "TED";
 #define SNAP_MAJOR 1
-#define SNAP_MINOR 12
+#define SNAP_MINOR 13
 
 int ted_snapshot_write_module(snapshot_t *s)
 {
@@ -231,6 +231,12 @@ int ted_snapshot_write_module(snapshot_t *s)
         || SMW_CLOCK(m, ted.refresh_clock_hold_end > maincpu_clk
                         ? ted.refresh_clock_hold_end - maincpu_clk : 0) < 0
         || SMW_B(m, (uint8_t)ted.refresh_clock_hold) < 0) {
+        goto fail;
+    }
+
+    /* Version 1.13: time since the last state change of the sound voices
+       and the sound output stage. */
+    if (ted_sound_snapshot_write_state(m) < 0) {
         goto fail;
     }
 
@@ -476,7 +482,7 @@ int ted_snapshot_read_module(snapshot_t *s)
         && ((ted.ted_raster_counter - 1) & 7) == (unsigned int)ted.raster.ysmooth;
     if (snapshot_version_is_bigger(major_version, minor_version, 1, 9)) {
         if (SMR_B_INT(m, &ted.draw_ycounter) < 0
-            || SMR_B_INT(m, &ted.raster.ycounter) < 0
+            || SMR_B_UINT(m, &ted.raster.ycounter) < 0
             || SMR_B_INT(m, &ted.matrix_fetch_pending) < 0
             || ted.draw_ycounter > 7 || ted.raster.ycounter > 7
             || ted.matrix_fetch_pending > 1) {
@@ -513,6 +519,11 @@ int ted_snapshot_read_module(snapshot_t *s)
         }
         ted.fetch_clock_hold_end = fetch_hold ? maincpu_clk + fetch_hold : 0;
         ted.refresh_clock_hold_end = refresh_hold ? maincpu_clk + refresh_hold : 0;
+    }
+    if (snapshot_version_is_bigger(major_version, minor_version, 1, 12)) {
+        if (ted_sound_snapshot_read_state(m) < 0) {
+            goto fail;
+        }
     }
     ted.clock_hold_end = ted.fetch_clock_hold_end;
     if (ted.refresh_clock_hold_end > ted.clock_hold_end) {
