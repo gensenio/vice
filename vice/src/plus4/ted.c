@@ -393,9 +393,13 @@ static void ted_set_geometry(void)
                         0, /* gfx area doesn't move */
                         ted.first_displayed_line,
                         ted.last_displayed_line,
-                        -TED_RASTER_X(0),  /* extra offscreen border left */
-                        0 + TED_SCREEN_XPIX -
-                        ted.screen_leftborderwidth - ted.screen_rightborderwidth + TED_RASTER_X(0)) /* extra offscreen border right */;
+                        /* The 640 dot frame buffer line starts with the TV
+                           line, TED_DRAW_DISPLAY_START dots before the display.
+                           The left margin must not be negative: the widest
+                           left border (NTSC debug) is exactly that wide. */
+                        TED_DRAW_DISPLAY_START - ted.screen_leftborderwidth, /* extra offscreen border left */
+                        640 - TED_DRAW_DISPLAY_START - TED_SCREEN_XPIX
+                        - ted.screen_rightborderwidth); /* extra offscreen border right */
     ted.raster.geometry->pixel_aspect_ratio = ted_get_pixel_aspect();
     ted.raster.viewport->crt_type = ted_get_crt_type();
 }

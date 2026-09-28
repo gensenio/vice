@@ -786,6 +786,20 @@ truncated snapshots. Randomized tests compare output and every pipeline field
 between batched and one-dot execution, including all display modes and scrolls.
 These are software consistency tests, not independent measurements of silicon.
 
+The line buffer must cover the widest canvas, 520 dots for NTSC with debug
+borders; it was 512, so each published line wrote 8 bytes past the renderer
+state and the black line read past its source. The test publishes both at that
+width. A line emits at most 456 positions and the rest is border fill, so
+snapshot module 1.14 still stores 512 positions.
+
+The frame buffer margins came from the removed renderer's `TED_RASTER_X`,
+which put the display 60 dots after the line start; the pipeline, like the
+counters, puts it 64 dots after. With the 64 dot left border of NTSC debug
+mode the left margin was -4, passed to `raster_set_geometry()` as unsigned,
+and xplus4 crashed in the first canvas refresh (upstream VICE has the same
+values). The margins now use `TED_DRAW_DISPLAY_START`, and `ted-mode-test.c`
+checks every border mode in both standards. The canvas itself is unchanged.
+
 The surrounding CPU-clock DMA and position-counter scheduling remains in place;
 this change does not establish dot-level fidelity of every fetch stage or model
 the analogue output's slew. The hires scroll gap retains the preceding cell's zero-bit colour.

@@ -4,15 +4,18 @@
 #include <stdio.h>
 #include <string.h>
 #include "../../src/plus4/ted-draw.c"
+#include "ted-timing.h"
 
 ted_t ted;
 CLOCK maincpu_clk;
 static uint8_t memory[8192];
-static uint8_t published[512];
+static uint8_t published[1024];
 
+/* Like the raster publisher, read one canvas width of pixels. */
 void raster_line_emulate_pixels(struct raster_s *raster, const uint8_t *pixels)
 {
-    memcpy(published, pixels, sizeof(published));
+    assert(raster->geometry->screen_size.width <= sizeof(published));
+    memcpy(published, pixels, raster->geometry->screen_size.width);
 }
 
 /* In-memory snapshot transport; exercise the production field serializer. */
@@ -192,6 +195,28 @@ static void counter_delay(void)
     assert(beam.h == 0);
 }
 
+/* NTSC with debug borders has the widest canvas, 520 dots.  The line and
+   the black line must both cover it: the publisher reads the full width. */
+static void wide_canvas(void)
+{
+    geometry_t geometry;
+    unsigned int width = TED_SCREEN_XPIX + TED_SCREEN_NTSC_DEBUG_LEFTBORDERWIDTH
+                         + TED_SCREEN_NTSC_DEBUG_RIGHTBORDERWIDTH;
+
+    setup(TED_NORMAL_TEXT_MODE, 0);
+    memset(&geometry, 0, sizeof(geometry));
+    geometry.screen_size.width = width;
+    ted.raster.geometry = &geometry;
+    ted.screen_leftborderwidth = TED_SCREEN_NTSC_DEBUG_RIGHTBORDERWIDTH;
+    assert(sizeof(beam.line) >= width);
+    memset(published, 0xff, sizeof(published));
+    ted_draw_line(114, 1);
+    assert(published[0] == 6 && published[width - 1] == 6);
+    ted_draw_black_line();
+    assert(published[0] == 0 && published[width - 1] == 0);
+    ted.raster.geometry = NULL;
+}
+
 static void snapshots(void)
 {
     snapshot_module_t m = {{0}, 0, 0};
@@ -362,6 +387,7 @@ int main(void)
     colors();
     fetched_memory();
     counter_delay();
+    wide_canvas();
     chunking();
     snapshots();
     event_equivalence();

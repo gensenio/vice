@@ -81,6 +81,34 @@ void vsync_do_vsync(struct video_canvas_s *canvas)
     vsyncs++;
 }
 
+static int video_standard;
+static viewport_t viewport;
+static unsigned int canvas_width, margin_left, margin_right;
+
+int resources_get_int(const char *name, int *value_return)
+{
+    *value_return = video_standard;
+    return 0;
+}
+
+void raster_set_geometry(raster_t *raster,
+                         unsigned int width, unsigned int height,
+                         unsigned int screen_width, unsigned int screen_height,
+                         unsigned int gfx_width, unsigned int gfx_height,
+                         unsigned int text_width, unsigned int text_height,
+                         unsigned int gfx_position_x,
+                         unsigned int gfx_position_y,
+                         int gfx_area_moves,
+                         unsigned int first_displayed_line,
+                         unsigned int last_displayed_line,
+                         unsigned int extra_offscreen_border_left,
+                         unsigned int extra_offscreen_border_right)
+{
+    canvas_width = screen_width;
+    margin_left = extra_offscreen_border_left;
+    margin_right = extra_offscreen_border_right;
+}
+
 static void init_alarm(alarm_t *alarm)
 {
     memset(alarm, 0, sizeof(*alarm));
@@ -231,6 +259,26 @@ int main(void)
         }
     }
     assert(ted.ted_raster_counter == 0 && vsyncs == 4);
+
+    /* Every border mode places the canvas inside the frame buffer line,
+       which starts with the TV line.  NTSC debug borders gave a margin of
+       -4, passed as unsigned: the first refresh read 4 GiB off the buffer. */
+    for (video_standard = MACHINE_SYNC_PAL; video_standard <= MACHINE_SYNC_NTSC;
+         video_standard++) {
+        int border_mode;
+
+        for (border_mode = 0; border_mode < 4; border_mode++) {
+            setup(0);
+            ted.raster.viewport = &viewport;
+            ted_timing_set(NULL, border_mode);
+            ted_set_geometry();
+            assert(margin_left <= TED_DRAW_DISPLAY_START);
+            assert(margin_left + (unsigned int)ted.screen_leftborderwidth
+                   == TED_DRAW_DISPLAY_START);
+            assert(margin_right <= 640
+                   && margin_left + canvas_width + margin_right == 640);
+        }
+    }
 
     puts("TED PAL/NTSC mode tests passed");
     return 0;

@@ -34,8 +34,16 @@
 #include "raster-line.h"
 #include "snapshot.h"
 #include "ted-draw.h"
+#include "ted-timing.h"
 #include "tedtypes.h"
 #include "viewport.h"
+
+/* A line emits at most 456 output positions; ted_draw_line() fills the rest
+   of the canvas with the border.  The buffer must hold the widest canvas,
+   NTSC with debug borders.  Snapshots keep the first 512 positions. */
+#define TED_DRAW_LINE_SIZE  (TED_SCREEN_XPIX + TED_SCREEN_NTSC_DEBUG_LEFTBORDERWIDTH \
+                             + TED_SCREEN_NTSC_DEBUG_RIGHTBORDERWIDTH)
+#define TED_DRAW_SNAPSHOT_LINE  512
 
 /* The dot counter and the TV's output position are separate.  A write to
    $ff1e changes the former after one dot, never pixels already emitted.
@@ -53,7 +61,7 @@ typedef struct {
     int pending_color, pending_counter;
     uint8_t color_value, counter_value;
     unsigned int delay;
-    uint8_t line[512];
+    uint8_t line[TED_DRAW_LINE_SIZE];
 } ted_beam_t;
 
 static ted_beam_t beam;
@@ -239,7 +247,7 @@ static void emit(unsigned int n)
     uint64_t pixels = pixel_colors();
     unsigned int skip = multicolor() ? beam.pair : 0;
     unsigned int x = beam.x;
-    int dest = (int)x + ted.screen_leftborderwidth - 64;
+    int dest = (int)x + ted.screen_leftborderwidth - TED_DRAW_DISPLAY_START;
     unsigned int count = n;
 
     if (dest < 0) {
@@ -302,7 +310,7 @@ static void emit_cells(unsigned int count)
     unsigned int m = mode();
     unsigned int i, b, attr, chr, c0, c1;
     unsigned int row = ted.raster.ycounter;
-    uint8_t *p = beam.line + beam.x + ted.screen_leftborderwidth - 64;
+    uint8_t *p = beam.line + beam.x + ted.screen_leftborderwidth - TED_DRAW_DISPLAY_START;
     uint8_t *font = ted.chargen_ptr;
     uint8_t *bitmap = ted.bitmap_ptr;
     uint64_t bg = repeat_color(beam.palette[0]);
@@ -423,7 +431,7 @@ static void emit_cells(unsigned int count)
    border event, and never skip a pending register latch. */
 static void emit_border(unsigned int n)
 {
-    int dest = (int)beam.x + ted.screen_leftborderwidth - 64;
+    int dest = (int)beam.x + ted.screen_leftborderwidth - TED_DRAW_DISPLAY_START;
     unsigned int count = n;
 
     if (dest < 0) {
@@ -484,7 +492,7 @@ static void emit_period(void)
         }
         memset(beam.line + left, gap, beam.scroll);
         beam.h = beam.scroll;
-        beam.x = 64 + beam.scroll;
+        beam.x = TED_DRAW_DISPLAY_START + beam.scroll;
         beam.pair = 0;
         fetch_cell(0);
         beam.bits = beam.waiting_bits;
@@ -519,7 +527,7 @@ static void run_dots(uint64_t remaining)
     if (remaining == 456 && !beam.sub && beam.h == 392 && beam.x == 0
         && !beam.delay && beam.border && !ted.raster.border_disable
         && (!ted.idle_state || ted.raster.blank_enabled || ted.raster.blank_this_line)
-        && ted.screen_leftborderwidth >= 0 && ted.screen_leftborderwidth <= 64) {
+        && ted.screen_leftborderwidth >= 0 && ted.screen_leftborderwidth <= TED_DRAW_DISPLAY_START) {
         emit_period();
         return;
     }
@@ -537,7 +545,7 @@ static void run_dots(uint64_t remaining)
         if (!beam.delay && remaining >= 8 && beam.h < ((ted.regs[7] & 8) ? 320U : 312U)
             && (beam.h & 7) == beam.scroll && !beam.pair
             && beam.control1 == ted.regs[6] && beam.control2 == ted.regs[7]) {
-            int dest = (int)beam.x + ted.screen_leftborderwidth - 64;
+            int dest = (int)beam.x + ted.screen_leftborderwidth - TED_DRAW_DISPLAY_START;
             n = ((beam.h < 8 && !(ted.regs[7] & 8) ? 8 : (ted.regs[7] & 8) ? 320 : 312) - beam.h) / 8;
             if (remaining / 8 < n) { n = (unsigned int)(remaining / 8); }
             if (n && dest >= 0 && dest + n * 8 <= sizeof(beam.line)) {
@@ -645,7 +653,7 @@ void ted_draw_line(CLOCK clk, int visible)
 {
     ted_draw_sync(clk);
     if (visible) {
-        int end = (int)beam.x + ted.screen_leftborderwidth - 64;
+        int end = (int)beam.x + ted.screen_leftborderwidth - TED_DRAW_DISPLAY_START;
         unsigned int width = ted.raster.geometry->screen_size.width;
         if (end < 0) { end = 0; }
         if ((unsigned int)end < width) {
@@ -657,7 +665,7 @@ void ted_draw_line(CLOCK clk, int visible)
 
 void ted_draw_black_line(void)
 {
-    static const uint8_t black[512];
+    static const uint8_t black[TED_DRAW_LINE_SIZE];
     raster_line_emulate_pixels(&ted.raster, black);
 }
 
@@ -690,7 +698,7 @@ int ted_draw_snapshot_write(snapshot_module_t *m)
         || SMW_B(m, (uint8_t)(beam.pending_color + 1)) < 0
         || SMW_B(m, (uint8_t)beam.pending_counter) < 0
         || SMW_B(m, (uint8_t)beam.delay) < 0
-        || SMW_BA(m, beam.line, sizeof(beam.line)) < 0) {
+        || SMW_BA(m, beam.line, TED_DRAW_SNAPSHOT_LINE) < 0) {
         return -1;
     }
     return 0;
@@ -724,7 +732,7 @@ int ted_draw_snapshot_read(snapshot_module_t *m)
         || SMR_B(m, &color) < 0
         || SMR_B(m, &counter) < 0
         || SMR_B(m, &delay) < 0
-        || SMR_BA(m, saved.line, sizeof(saved.line)) < 0) {
+        || SMR_BA(m, saved.line, TED_DRAW_SNAPSHOT_LINE) < 0) {
         return -1;
     }
     if (saved.clk > maincpu_clk || saved.sub > 3 || saved.h > 511 || saved.x > 576
@@ -740,7 +748,7 @@ int ted_draw_snapshot_read(snapshot_module_t *m)
             return -1;
         }
     }
-    for (i = 0; i < sizeof(saved.line); i++) {
+    for (i = 0; i < TED_DRAW_SNAPSHOT_LINE; i++) {
         if (saved.line[i] > 127) {
             snapshot_set_error(SNAPSHOT_MODULE_INCOMPATIBLE);
             return -1;

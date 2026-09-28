@@ -30,6 +30,10 @@
 
 #include "types.h"
 
+/* Output position of the first display dot: a line starts 64 dots earlier
+   (cycle 0), so no border mode can show a wider left border. */
+#define TED_DRAW_DISPLAY_START  64
+
 void ted_draw_init(void);
 void ted_draw_reset(void);
 void ted_draw_sync(CLOCK clk);
