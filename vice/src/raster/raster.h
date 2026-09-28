@@ -150,6 +150,9 @@ struct raster_s {
     /* This is != 0 if we cannot use the values in the cache anymore.  */
     int dont_cache;
 
+    /* Completed pixel lines use output differences for host updates. */
+    int pixel_pipeline;
+
     /* Don't cache anything, for cycle based emulation */
     int dont_cache_all;
 

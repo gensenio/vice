@@ -121,6 +121,10 @@ void raster_canvas_handle_end_of_frame(raster_t *raster)
 
     if (raster->dont_cache) {
         video_canvas_refresh_all(raster->canvas);
+        if (raster->pixel_pipeline) {
+            raster->dont_cache = 0;
+            raster->update_area->is_null = 1;
+        }
     } else {
         refresh_canvas(raster);
     }

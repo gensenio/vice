@@ -35,40 +35,30 @@
 #include "maincpu.h"
 #include "ted-fetch.h"
 #include "ted-counter.h"
+#include "ted-draw.h"
 #include "tedtypes.h"
 #include "types.h"
 
 
-/* Keep the value already fetched by TED when the CPU overwrites bitmap RAM
-   before the deferred raster draw.  The ordinary no-write path still reads
-   RAM directly; no full bitmap or scanline copy is needed. */
+/* Preserve the fetched pixel latch before a CPU store to video RAM. */
 void ted_fetch_store(uint16_t addr, uint8_t old_value, unsigned int ram_mask)
 {
-    unsigned int base = (ted.regs[0x12] & 0x38) << 10;
-    unsigned int column;
-    unsigned int cycle;
+    unsigned int base;
+    unsigned int mask;
 
-    if (!(ted.regs[0x06] & 0x20) || (ted.regs[0x12] & 4)
-        || !ted.character_fetch_on || ted.idle_state
-        || ((addr ^ base) & ram_mask & 0xe000)) {
+    if (!ted.character_fetch_on || (ted.regs[0x12] & 4)
+        || (addr & 7) != ted.raster.ycounter) {
         return;
     }
-
-    ted_counter_update(maincpu_clk);
-    if ((addr & 7) != ted.raster.ycounter) {
-        return;
+    if (ted.regs[0x06] & 0x20) {
+        base = (ted.regs[0x12] & 0x38) << 10;
+        mask = 0xe000;
+    } else {
+        mask = ((ted.regs[6] & 0x40) || (ted.regs[7] & 0x80)) ? 0xf800 : 0xfc00;
+        base = (ted.regs[0x13] << 8) & mask;
     }
-    column = ((((addr - base) & 0x1fff) >> 3) - ted.memptr) & 0x3ff;
-    cycle = TED_RASTER_CYCLE(maincpu_clk);
-    /* Once the entire cell has passed the output, including the maximum
-       horizontal scroll, its fetched byte cannot depend on this store.
-       Keep writes near the fetch boundary on the existing path until the
-       internal latch phase is represented independently of the renderer. */
-    if (column < TED_SCREEN_TEXTCOLS && cycle >= 20 + column * 2
-        && !ted.bitmap_latched[column]) {
-        ted.bitmap_data[column] = old_value;
-        ted.bitmap_latched[column] = 1;
-        ted.bitmap_dirty = 1;
+    if (!((addr ^ base) & ram_mask & mask)) {
+        ted_draw_sync(maincpu_clk);
     }
 }
 

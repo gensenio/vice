@@ -44,6 +44,7 @@
 #include "raster-changes.h"
 #include "ted-badline.h"
 #include "ted-counter.h"
+#include "ted-draw.h"
 #include "ted-fetch.h"
 #include "ted-irq.h"
 #include "ted-mem.h"
@@ -85,7 +86,9 @@ inline static void ted_local_store_vbank(uint16_t addr, uint8_t value)
        WARNING: Assumes `maincpu_rmw_flag' is 0 or 1.  */
     ted_handle_pending_alarms(maincpu_rmw_flag + 1);
 
-    ted_fetch_store(addr, mem_ram[addr], 0xffff);
+    if (mem_ram[addr] != value) {
+        ted_fetch_store(addr, mem_ram[addr], 0xffff);
+    }
     mem_ram[addr] = value;
 }
 
@@ -97,7 +100,9 @@ inline static void ted_local_store_vbank_32k(uint16_t addr, uint8_t value)
        WARNING: Assumes `maincpu_rmw_flag' is 0 or 1.  */
     ted_handle_pending_alarms(maincpu_rmw_flag + 1);
 
-    ted_fetch_store(addr & 0x7fff, mem_ram[addr & 0x7fff], 0x7fff);
+    if (mem_ram[addr & 0x7fff] != value) {
+        ted_fetch_store(addr & 0x7fff, mem_ram[addr & 0x7fff], 0x7fff);
+    }
     mem_ram[addr & 0x7fff] = value;
 }
 
@@ -109,7 +114,9 @@ inline static void ted_local_store_vbank_16k(uint16_t addr, uint8_t value)
        WARNING: Assumes `maincpu_rmw_flag' is 0 or 1.  */
     ted_handle_pending_alarms(maincpu_rmw_flag + 1);
 
-    ted_fetch_store(addr & 0x3fff, mem_ram[addr & 0x3fff], 0x3fff);
+    if (mem_ram[addr & 0x3fff] != value) {
+        ted_fetch_store(addr & 0x3fff, mem_ram[addr & 0x3fff], 0x3fff);
+    }
     mem_ram[addr & 0x3fff] = value;
 }
 
@@ -163,7 +170,6 @@ inline static void check_lower_upper_border(const uint8_t value,
                                             unsigned int line, int cycle)
 {
     int window;
-    int start_cycle;
 
     if (!((value ^ ted.regs[0x06]) & 0x18)) {
         return;
@@ -189,16 +195,7 @@ inline static void check_lower_upper_border(const uint8_t value,
         return;
     }
 
-    /* The side border flip-flop consults the window only at the start of
-       the display, so a later change affects the following line.  */
-    start_cycle = (ted.regs[0x07] & 8) ? TED_40COL_START_CYCLE
-                                       : TED_38COL_START_CYCLE;
-    if (cycle < start_cycle) {
-        ted.raster.blank_enabled = !window;
-    } else {
-        raster_changes_next_line_add_int(&ted.raster,
-                                         &ted.raster.blank_enabled, !window);
-    }
+    ted.raster.blank_enabled = !window;
 
     TED_DEBUG_REGISTER(("Vertical window %s", window ? "opened" : "closed"));
 }
@@ -258,52 +255,6 @@ inline static void ted06_store(const uint8_t value)
     ted_update_video_mode(cycle);
 }
 
-inline static void check_lateral_border(const uint8_t value, int cycle,
-                                        raster_t *raster)
-{
-    int start, stop;
-
-    if (!((value ^ ted.regs[0x07]) & 0x8)) {
-        return;
-    }
-
-    if (value & 0x8) {
-        start = TED_40COL_START_PIXEL;
-        stop = TED_40COL_STOP_PIXEL;
-        TED_DEBUG_REGISTER(("40 column mode enabled"));
-    } else {
-        start = TED_38COL_START_PIXEL;
-        stop = TED_38COL_STOP_PIXEL;
-        TED_DEBUG_REGISTER(("38 column mode enabled"));
-    }
-
-    if (cycle < TED_40COL_START_CYCLE) {
-        raster->display_xstart = start;
-    } else {
-        /* Switching from 38 to 40 columns between the two start tests
-           makes both tests fail, so this line stays in the border.  */
-        if (cycle < TED_38COL_START_CYCLE && (value & 0x8)) {
-            raster->blank_this_line = 1;
-        }
-        raster_changes_next_line_add_int(raster, &raster->display_xstart,
-                                         start);
-    }
-
-    if (cycle < TED_38COL_STOP_CYCLE) {
-        raster->display_xstop = stop;
-    } else {
-        /* Switching from 40 to 38 columns between the two stop tests makes
-           both tests fail: the display continues into the next line.  */
-        if (cycle < TED_40COL_STOP_CYCLE && !(value & 0x8)
-            && ((!raster->blank_enabled && !raster->blank_this_line)
-                || raster->open_left_border)) {
-            raster->open_right_border = 1;
-        }
-        raster_changes_next_line_add_int(raster, &raster->display_xstop,
-                                         stop);
-    }
-}
-
 inline static void ted07_store(uint8_t value)
 {
     raster_t *raster;
@@ -315,31 +266,10 @@ inline static void ted07_store(uint8_t value)
     raster = &ted.raster;
     cycle = TED_RASTER_CYCLE(maincpu_clk);
 
-    if ((value & 7) != (ted.regs[0x07] & 7)) {
-        /* The shift register uses the new scroll from the next character
-           load: character i is output during cycles 16 + 2 * i and
-           17 + 2 * i.  Later characters move, leaving the background
-           colour in the gap or overlapping the preceding character.  The
-           exact pixel within a character is not modelled.  */
-        raster_changes_foreground_add_int(raster,
-                                          cycle < TED_40COL_START_CYCLE ? 0
-                                          : (cycle - TED_40COL_START_CYCLE) / 2 + 1,
-                                          &raster->xsmooth,
-                                          value & 7);
-    }
-
-    /* Bit 4 (CSEL) selects 38/40 column mode.  */
-    check_lateral_border(value, cycle, raster);
-
-    /* Bit 7 selects whether bit 7 of the character code reverses the
-       character or addresses 256 characters; it takes effect from the next
-       character fetch, like the character set address it also changes (see
-       `ted_update_memory_ptrs()').  After the character window it applies
-       from the next line; the line must not be drawn with it already.  */
-    if ((value ^ ted.regs[0x07]) & 0x80) {
-        raster_changes_foreground_add_int(raster, TED_RASTER_CHAR(cycle),
-                                          &ted.reverse_mode, value & 0x80);
-    }
+    raster->xsmooth = value & 7;
+    ted.reverse_mode = value & 0x80;
+    /* Horizontal border comparisons and mode/scroll latches belong to the
+       pixel pipeline; changing the register does not redraw past dots. */
 
     old_value = ted.regs[0x07];
 
@@ -537,95 +467,21 @@ inline static void ted14_store(const uint8_t value)
 
 inline static void ted15_store(uint8_t value)
 {
-    int x_pos;
-
-    value &= 0x7f;
-
-    TED_DEBUG_REGISTER(("Background #0 color register: $%02X", value));
-
-    if (maincpu_rmw_flag) {
-        x_pos = TED_RASTER_X(TED_RASTER_CYCLE(first_write_cycle));
-        raster_changes_background_add_int(&ted.raster, x_pos,
-                                          (int *)&ted.raster.background_color,
-                                          0x7f);
-        raster_changes_background_add_int(&ted.raster, x_pos + 1,
-                                          (int *)&ted.raster.background_color,
-                                          ted.regs[0x15]);
-    }
-
-    x_pos = TED_RASTER_X(TED_RASTER_CYCLE(last_write_cycle));
-
-    /* FIXME: Check whether this is true on Plus4 */
-    if (!ted.force_black_overscan_background_color) {
-        raster_changes_background_add_int
-            (&ted.raster, x_pos,
-            &ted.raster.idle_background_color, value);
-        raster_changes_background_add_int
-            (&ted.raster, x_pos,
-            &ted.raster.xsmooth_color, value);
-    }
-
-    raster_changes_background_add_int(&ted.raster, x_pos,
-                                      (int *)&ted.raster.background_color,
-                                      0x7f);
-    raster_changes_background_add_int(&ted.raster, x_pos + 1,
-                                      (int *)&ted.raster.background_color,
-                                      value);
-    ted.regs[0x15] = value;
+    ted.regs[0x15] = value & 0x7f;
+    ted.raster.background_color = value & 0x7f;
+    ted.raster.idle_background_color = value & 0x7f;
 }
 
 inline static void ted161718_store(uint16_t addr, uint8_t value)
 {
-    int char_num;
-
-    value &= 0x7f;
-
-    TED_DEBUG_REGISTER(("Background color #%d register: $%02X",
-                        addr - 0x15, value));
-
-    ted.regs[addr] = value;
-
-    /* FIXME add sparkle effect */
-    char_num = TED_RASTER_CHAR(TED_RASTER_CYCLE(last_write_cycle));
-
-    raster_changes_foreground_add_int(&ted.raster,
-                                      char_num,
-                                      &ted.ext_background_color[addr - 0x16],
-                                      value);
+    ted.regs[addr] = value & 0x7f;
+    ted.ext_background_color[addr - 0x16] = value & 0x7f;
 }
 
 inline static void ted19_store(uint8_t value)
 {
-    int x_pos;
-
-    TED_DEBUG_REGISTER(("Border color register: $%02X", value));
-
-    value &= 0x7f;
-
-    if (maincpu_rmw_flag) {
-        x_pos = TED_RASTER_X(TED_RASTER_CYCLE(first_write_cycle));
-        raster_changes_border_add_int(&ted.raster,
-                                      x_pos,
-                                      (int *)&ted.raster.border_color,
-                                      0x7f);
-        raster_changes_border_add_int(&ted.raster,
-                                      x_pos + 1,
-                                      (int *)&ted.raster.border_color,
-                                      ted.regs[0x19]);
-    }
-
-    ted.regs[0x19] = value;
-
-    x_pos = TED_RASTER_X(TED_RASTER_CYCLE(last_write_cycle));
-
-    raster_changes_border_add_int(&ted.raster,
-                                  x_pos,
-                                  (int *)&ted.raster.border_color,
-                                  0x7f);
-    raster_changes_border_add_int(&ted.raster,
-                                  x_pos + 1,
-                                  (int *)&ted.raster.border_color,
-                                  value);
+    ted.regs[0x19] = value & 0x7f;
+    ted.raster.border_color = value & 0x7f;
 }
 
 inline static void ted1a1b_store(uint16_t addr, uint8_t value)
@@ -738,11 +594,7 @@ inline static void ted1f_store(uint8_t value)
     ted.cursor_phase = current_cursor_phase | new_cursor_count;
     ted.cursor_visible = ted.cursor_phase & 0x10;
     ted.cursor_phase = (ted.cursor_phase - pending) & 0x1f;
-    /* Keep the CPU-visible counter current without changing pixels that
-       have already passed through the video shift register. */
-    raster_changes_foreground_add_int(&ted.raster,
-                                     TED_RASTER_CHAR(TED_RASTER_CYCLE(maincpu_clk)),
-                                     &ted.draw_ycounter, value & 7);
+    ted.draw_ycounter = value & 7;
     ted.raster.ycounter = value & 7;
 }
 
@@ -775,6 +627,8 @@ void ted_store(uint16_t addr, uint8_t value)
     if (maincpu_clk >= ted.draw_clk) {
         ted_raster_draw_alarm_handler(maincpu_clk - ted.draw_clk, NULL);
     }
+
+    ted_draw_store(addr, value);
 
     switch (addr) {
         case 0x00:

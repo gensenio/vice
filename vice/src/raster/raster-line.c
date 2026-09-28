@@ -624,7 +624,7 @@ inline static void handle_visible_line(raster_t *raster)
     }
 }
 
-void raster_line_emulate(raster_t *raster)
+static void raster_line_emulate_internal(raster_t *raster, const uint8_t *pixels)
 {
     raster_draw_buffer_ptr_update(raster);
 
@@ -642,6 +642,16 @@ void raster_line_emulate(raster_t *raster)
         || (raster->current_line <= raster->geometry->last_displayed_line - raster->geometry->screen_size.height
             && raster->geometry->screen_size.height <= raster->geometry->last_displayed_line)
         ) {
+        if (pixels != NULL) {
+            /* Completed pixel lines can be compared directly.  This only
+               suppresses unchanged host updates; the chip still clocks and
+               renders every dot. */
+            if (memcmp(raster->draw_buffer_ptr, pixels, raster->geometry->screen_size.width)) {
+                memcpy(raster->draw_buffer_ptr, pixels, raster->geometry->screen_size.width);
+                add_line_to_area(raster->update_area, map_current_line_to_area(raster),
+                                 0, raster->geometry->screen_size.width - 1);
+            }
+        } else {
         /* handle lines with no border or with changes that may affect
            the border as visible lines */
         if (raster->can_disable_border && (raster->border_disable || raster->changes->have_on_this_line)) {
@@ -655,7 +665,9 @@ void raster_line_emulate(raster_t *raster)
             }
         }
 
-        if (++raster->num_cached_lines == (1
+        }
+
+        if (pixels == NULL && ++raster->num_cached_lines == (1
                                            + raster->geometry->last_displayed_line
                                            - raster->geometry->first_displayed_line)) {
             raster->dont_cache = 1;
@@ -711,4 +723,17 @@ void raster_line_emulate(raster_t *raster)
     }
 
     raster->blank_this_line = 0;
+}
+
+/* A chip with its own pixel pipeline supplies a completed palette-index line. */
+void raster_line_emulate_pixels(raster_t *raster, const uint8_t *pixels)
+{
+    raster->pixel_pipeline = 1;
+    raster_line_emulate_internal(raster, pixels);
+}
+
+void raster_line_emulate(raster_t *raster)
+{
+    raster->pixel_pipeline = 0;
+    raster_line_emulate_internal(raster, NULL);
 }

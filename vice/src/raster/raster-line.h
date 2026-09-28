@@ -27,6 +27,8 @@
 #ifndef VICE_RASTER_LINE_H
 #define VICE_RASTER_LINE_H
 
+#include "types.h"
+
 struct raster_s;
 
 unsigned int raster_line_get_real_mode(struct raster_s *raster);
@@ -34,5 +36,6 @@ void raster_line_draw_borders(struct raster_s *raster);
 void raster_line_fill_xsmooth_region(struct raster_s *raster);
 void raster_line_draw_blank(struct raster_s *raster, unsigned int start, unsigned int end);
 void raster_line_emulate(struct raster_s *raster);
+void raster_line_emulate_pixels(struct raster_s *raster, const uint8_t *pixels);
 
 #endif

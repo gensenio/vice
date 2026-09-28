@@ -28,6 +28,19 @@
 #ifndef VICE_TED_DRAW_H
 #define VICE_TED_DRAW_H
 
+#include "types.h"
+
 void ted_draw_init(void);
+void ted_draw_reset(void);
+void ted_draw_sync(CLOCK clk);
+void ted_draw_store(unsigned int addr, uint8_t value);
+void ted_draw_begin_line(CLOCK clk);
+void ted_draw_line(CLOCK clk, int visible);
+void ted_draw_black_line(void);
+void ted_draw_freeze(CLOCK delta);
+struct snapshot_module_s;
+int ted_draw_snapshot_write(struct snapshot_module_s *m);
+int ted_draw_snapshot_read(struct snapshot_module_s *m);
+void ted_draw_snapshot_legacy(void);
 
 #endif

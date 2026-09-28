@@ -172,6 +172,7 @@ void ted_freeze_update(void)
     from = ted.freeze_clk;
     ted.last_emulate_line_clk += delta;
     ted.counter_clk += delta;
+    ted_draw_freeze(delta);
     if (ted.draw_clk > from) {
         ted.draw_clk += delta;
     }
@@ -535,6 +536,7 @@ void ted_reset(void)
     ted.cursor_phase = 0;
 
     ted.fastmode = 1;
+    ted_draw_reset();
 }
 
 void ted_reset_registers(void)
@@ -613,14 +615,11 @@ static uint8_t ted_idle_fetch(void)
 void ted_update_memory_ptrs(unsigned int cycle)
 {
     /* FIXME: This is *horrible*!  */
-    static uint8_t *old_screen_ptr, *old_bitmap_ptr, *old_chargen_ptr;
-    static uint8_t *old_color_ptr;
     uint16_t screen_addr, char_addr, bitmap_addr, color_addr;
     uint8_t *screen_base;            /* Pointer to screen memory.  */
     uint8_t *char_base;              /* Pointer to character memory.  */
     uint8_t *bitmap_base;            /* Pointer to bitmap memory.  */
     uint8_t *color_base;             /* Pointer to color memory.  */
-    int tmp;
     unsigned int video_romsel;
     unsigned int cpu_romsel;
 
@@ -666,187 +665,21 @@ void ted_update_memory_ptrs(unsigned int cycle)
 #endif
     TED_DEBUG_REGISTER(("\tColor memory at $%04X", color_addr));
 
-    tmp = TED_RASTER_CHAR(cycle);
-
+    ted.screen_ptr = screen_base;
+    ted.bitmap_ptr = bitmap_base;
+    ted.chargen_ptr = char_base;
+    ted.color_ptr = color_base;
     if (ted.idle_data_location != IDLE_NONE) {
-        raster_changes_foreground_add_int(&ted.raster,
-                                          TED_RASTER_CHAR(cycle),
-                                          &ted.idle_data,
-                                          ted_idle_fetch());
-    }
-
-    if (tmp <= 0 && maincpu_clk < ted.draw_clk) {
-        old_screen_ptr = ted.screen_ptr = screen_base;
-        old_bitmap_ptr = ted.bitmap_ptr = bitmap_base;
-        old_chargen_ptr = ted.chargen_ptr = char_base;
-        old_color_ptr = ted.color_ptr = color_base;
-    } else if (tmp < TED_SCREEN_TEXTCOLS) {
-        if (screen_base != old_screen_ptr) {
-            raster_changes_foreground_add_ptr(&ted.raster, tmp,
-                                              (void *)&ted.screen_ptr,
-                                              (void *)screen_base);
-            old_screen_ptr = screen_base;
-        }
-
-        if (bitmap_base != old_bitmap_ptr) {
-            raster_changes_foreground_add_ptr(&ted.raster,
-                                              tmp,
-                                              (void *)&ted.bitmap_ptr,
-                                              (void *)(bitmap_base));
-            old_bitmap_ptr = bitmap_base;
-        }
-
-        if (char_base != old_chargen_ptr) {
-            raster_changes_foreground_add_ptr(&ted.raster,
-                                              tmp,
-                                              (void *)&ted.chargen_ptr,
-                                              (void *)char_base);
-            old_chargen_ptr = char_base;
-        }
-        if (color_base != old_color_ptr) {
-            raster_changes_foreground_add_ptr(&ted.raster, tmp,
-                                              (void *)&ted.color_ptr,
-                                              (void *)color_base);
-            old_color_ptr = color_base;
-        }
-    } else {
-        if (screen_base != old_screen_ptr) {
-            raster_changes_next_line_add_ptr(&ted.raster,
-                                             (void *)&ted.screen_ptr,
-                                             (void *)screen_base);
-            old_screen_ptr = screen_base;
-        }
-        if (bitmap_base != old_bitmap_ptr) {
-            raster_changes_next_line_add_ptr(&ted.raster,
-                                             (void *)&ted.bitmap_ptr,
-                                             (void *)(bitmap_base));
-            old_bitmap_ptr = bitmap_base;
-        }
-
-        if (char_base != old_chargen_ptr) {
-            raster_changes_next_line_add_ptr(&ted.raster,
-                                             (void *)&ted.chargen_ptr,
-                                             (void *)char_base);
-            old_chargen_ptr = char_base;
-        }
-        if (color_base != old_color_ptr) {
-            raster_changes_next_line_add_ptr(&ted.raster,
-                                             (void *)&ted.color_ptr,
-                                             (void *)color_base);
-            old_color_ptr = color_base;
-        }
+        ted.idle_data = ted_idle_fetch();
     }
 }
 
 /* Set the video mode according to the values in registers 6 and 7 of TED */
 void ted_update_video_mode(unsigned int cycle)
 {
-    static int old_video_mode = -1;
-    int new_video_mode;
-
-    new_video_mode = ((ted.regs[0x06] & 0x60) | (ted.regs[0x07] & 0x10)) >> 4;
-
-    if (new_video_mode != old_video_mode) {
-        if (TED_IS_ILLEGAL_MODE(new_video_mode)) {
-            /* Force the overscan color to black.  */
-            raster_changes_background_add_int
-                (&ted.raster, TED_RASTER_X(cycle),
-                &ted.raster.idle_background_color,
-                0);
-            raster_changes_background_add_int
-                (&ted.raster, TED_RASTER_X(cycle),
-                &ted.raster.xsmooth_color,
-                0);
-            ted.force_black_overscan_background_color = 1;
-        } else {
-            /* The overscan background color is given by the background color
-               register.  */
-            if (ted.raster.idle_background_color != ted.regs[0x15]) {
-                raster_changes_background_add_int
-                    (&ted.raster, TED_RASTER_X(cycle),
-                    &ted.raster.idle_background_color,
-                    ted.regs[0x15]);
-                raster_changes_background_add_int
-                    (&ted.raster, TED_RASTER_X(cycle),
-                    &ted.raster.xsmooth_color,
-                    ted.regs[0x15]);
-            }
-            ted.force_black_overscan_background_color = 0;
-        }
-
-        {
-            int pos;
-
-            pos = TED_RASTER_CHAR(cycle);
-
-            raster_changes_foreground_add_int(&ted.raster, pos,
-                                              &ted.raster.video_mode,
-                                              new_video_mode);
-
-            if (ted.idle_data_location != IDLE_NONE) {
-                raster_changes_foreground_add_int
-                    (&ted.raster, pos, (void *)&ted.idle_data,
-                    ted_idle_fetch());
-            }
-        }
-
-        old_video_mode = new_video_mode;
-    }
-
-#ifdef TED_VMODE_DEBUG
-    switch (new_video_mode) {
-        case TED_NORMAL_TEXT_MODE:
-            TED_DEBUG_VMODE(("Standard Text"));
-            break;
-        case TED_MULTICOLOR_TEXT_MODE:
-            TED_DEBUG_VMODE(("Multicolor Text"));
-            break;
-        case TED_HIRES_BITMAP_MODE:
-            TED_DEBUG_VMODE(("Hires Bitmap"));
-            break;
-        case TED_MULTICOLOR_BITMAP_MODE:
-            TED_DEBUG_VMODE(("Multicolor Bitmap"));
-            break;
-        case TED_EXTENDED_TEXT_MODE:
-            TED_DEBUG_VMODE(("Extended Text"));
-            break;
-        case TED_ILLEGAL_TEXT_MODE:
-            TED_DEBUG_VMODE(("Illegal Text"));
-            break;
-        case TED_ILLEGAL_BITMAP_MODE_1:
-            TED_DEBUG_VMODE(("Invalid Bitmap"));
-            break;
-        case TED_ILLEGAL_BITMAP_MODE_2:
-            TED_DEBUG_VMODE(("Invalid Bitmap"));
-            break;
-        default:                  /* cannot happen */
-            TED_DEBUG_VMODE(("???"));
-    }
-
-    TED_DEBUG_VMODE((" Mode enabled at line $%04X, cycle %u.",
-                     TED_RASTER_Y(maincpu_clk), cycle));
-#endif
-}
-
-/* Draw the current TV line black: the TV scans it without a picture.
-   Changes for the next line do not affect it; apply them now and keep the
-   state they leave for the next line.  */
-static void ted_draw_black_line(void)
-{
-    raster_t *raster = &ted.raster;
-    unsigned int border_color;
-    int blank_enabled, open_left_border;
-
-    raster_changes_apply_all(raster->changes->next_line);
-    border_color = raster->border_color;
-    blank_enabled = raster->blank_enabled;
-    open_left_border = raster->open_left_border;
-    raster->border_color = 0;
-    raster->blank_this_line = 1;
-    raster_line_emulate(raster);
-    raster->border_color = border_color;
-    raster->blank_enabled = blank_enabled;
-    raster->open_left_border = open_left_border;
+    ted.raster.video_mode = ((ted.regs[0x06] & 0x60) | (ted.regs[0x07] & 0x10)) >> 4;
+    ted.force_black_overscan_background_color = TED_IS_ILLEGAL_MODE(ted.raster.video_mode);
+    ted.raster.idle_background_color = ted.force_black_overscan_background_color ? 0 : ted.regs[0x15];
 }
 
 /* A frame shorter than the TV frame, for example in NTSC mode on a PAL
@@ -889,26 +722,7 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
     }
     ted_counter_update(ted.draw_clk);
 
-    if (ted.tv_current_line < ted.tv_height) {
-        raster_line_emulate(&ted.raster);
-    } else {
-        /* Raster-counter writes can extend a frame beyond the canvas.  The
-           line is not drawn, but register changes must still take effect.
-           Otherwise they accumulate across skipped lines and overrun the
-           fixed-size change lists (for example in HNY2013). */
-        raster_changes_apply_all(ted.raster.changes->background);
-        raster_changes_apply_all(ted.raster.changes->foreground);
-        raster_changes_apply_all(ted.raster.changes->border);
-        raster_changes_apply_all(ted.raster.changes->sprites);
-        raster_changes_apply_all(ted.raster.changes->next_line);
-        ted.raster.changes->have_on_this_line = 0;
-    }
-
-    if (ted.bitmap_dirty) {
-        memset(ted.bitmap_latched, 0, sizeof(ted.bitmap_latched));
-        ted.bitmap_dirty = 0;
-    }
-
+    ted_draw_line(ted.draw_clk, ted.tv_current_line < ted.tv_height);
     if (ted.dma_line == ted.last_dma_line) {
         ted.idle_state = 1;
     }
@@ -983,9 +797,12 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
 
     vsync_do_end_of_line();
 
-    /* DO VSYNC if the raster_counter in the TED reached the VSYNC signal */
-    /* Also do VSYNC if oversized screen reached a certain threashold, this will result in rolling screen just like on the real thing */
-    if (((signed int)(ted.tv_current_line - ted.tv_height) > 40) ||
+    /* Follow TED's vertical sync even when software selects a different
+       standard from the host canvas.  A 312-line PAL period on the NTSC
+       canvas must not hit the runaway-counter guard at line 303: that
+       would publish a second, nearly empty frame at the real sync. */
+    if ((ted.tv_current_line > (ted.tv_height > ted.screen_height
+                               ? ted.tv_height : ted.screen_height) + 40) ||
         (!repeat && ted.ted_raster_counter == ted.vsync_line)) {
         if (ted.tv_current_line < ted.tv_height) {
             ted_draw_unscanned_lines();
@@ -1029,6 +846,7 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
 
     /* Set the next draw event.  */
     ted.last_emulate_line_clk += ted.cycles_per_line;
+    ted_draw_begin_line(ted.last_emulate_line_clk);
     ted.draw_clk = ted.last_emulate_line_clk + ted.draw_cycle;
     alarm_set(ted.raster_draw_alarm, ted.draw_clk);
 }

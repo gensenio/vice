@@ -40,6 +40,7 @@
 #include "raster-sprite-status.h"
 #include "raster-sprite.h"
 #include "ted-irq.h"
+#include "ted-draw.h"
 #include "ted-snapshot.h"
 #include "ted-sound.h"
 #include "ted-timing.h"
@@ -108,7 +109,7 @@ void ted_snapshot_prepare(void)
 
 static char snap_module_name[] = "TED";
 #define SNAP_MAJOR 1
-#define SNAP_MINOR 13
+#define SNAP_MINOR 14
 
 int ted_snapshot_write_module(snapshot_t *s)
 {
@@ -119,6 +120,7 @@ int ted_snapshot_write_module(snapshot_t *s)
 
     /* Save the clocks of a frozen TED as they stand now.  */
     ted_freeze_update();
+    ted_draw_sync(maincpu_clk);
 
     m = snapshot_module_create (s, snap_module_name, SNAP_MAJOR, SNAP_MINOR);
     if (m == NULL) {
@@ -237,6 +239,10 @@ int ted_snapshot_write_module(snapshot_t *s)
     /* Version 1.13: time since the last state change of the sound voices
        and the sound output stage. */
     if (ted_sound_snapshot_write_state(m) < 0) {
+        goto fail;
+    }
+
+    if (ted_draw_snapshot_write(m) < 0) {
         goto fail;
     }
 
@@ -524,6 +530,13 @@ int ted_snapshot_read_module(snapshot_t *s)
         if (ted_sound_snapshot_read_state(m) < 0) {
             goto fail;
         }
+    }
+    if (snapshot_version_is_bigger(major_version, minor_version, 1, 13)) {
+        if (ted_draw_snapshot_read(m) < 0) {
+            goto fail;
+        }
+    } else {
+        ted_draw_snapshot_legacy();
     }
     ted.clock_hold_end = ted.fetch_clock_hold_end;
     if (ted.refresh_clock_hold_end > ted.clock_hold_end) {

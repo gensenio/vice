@@ -212,3 +212,12 @@ int main(void)
     puts("TED freeze tests passed");
     return 0;
 }
+
+/* Pixel rendering is covered by ted-pixel-test.c. */
+void ted_draw_freeze(CLOCK delta) {}
+void ted_draw_begin_line(CLOCK clk) {}
+void ted_draw_line(CLOCK clk, int visible)
+{
+    if (visible) { raster_line_emulate(&ted.raster); }
+}
+void ted_draw_black_line(void) { raster_line_emulate(&ted.raster); }

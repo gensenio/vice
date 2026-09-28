@@ -1,8 +1,5 @@
-/* Regression for the TED reverse/256 character bit ($ff07 bit 7).  It takes
-   effect from the next character fetch, like the character set address it
-   also changes; a write after the character window applies from the next
-   line and must not change the line being drawn.  Exercise the production
-   register handler for every cycle. */
+/* Register storage and PAL/NTSC/freeze hooks.  The pixel latch timing of
+   reverse and mode changes is exercised by ted-pixel-test.c. */
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -72,28 +69,12 @@ int main(void)
         uint8_t to = on ? 0x08 : 0x88;
 
         for (cycle = 0; cycle < 114; cycle++) {
-            int column = TED_RASTER_CHAR(cycle);
 
             setup(from);
             maincpu_clk = cycle;
             ted07_store(to);
-            if (column <= 0) {
-                assert(ted.reverse_mode == (to & 0x80));
-                assert(foreground.count == 0 && next_line.count == 0);
-            } else if (column < TED_SCREEN_TEXTCOLS) {
-                /* The line is drawn with the old value up to `column'. */
-                assert(ted.reverse_mode == (from & 0x80));
-                assert(foreground.count == 1 && next_line.count == 0);
-                assert(foreground.actions[0].where == column);
-                assert(foreground.actions[0].value.integer.newone == (to & 0x80));
-            } else {
-                /* After the window (e.g. Return to Promised Land's raster
-                   split at cycles 99-103), not on the line being drawn. */
-                assert(ted.reverse_mode == (from & 0x80));
-                assert(foreground.count == 0 && next_line.count == 1);
-                raster_changes_apply_all(&next_line);
-                assert(ted.reverse_mode == (to & 0x80));
-            }
+            assert(ted.reverse_mode == (to & 0x80));
+            assert(foreground.count == 0 && next_line.count == 0);
         }
     }
 

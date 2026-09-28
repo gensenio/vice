@@ -30,1070 +30,738 @@
 
 #include <string.h>
 
-#include "raster-cache-fill.h"
-#include "raster-cache-fill-1fff.h"
-#include "raster-cache-nibbles.h"
-#include "raster-cache-text-ext.h"
-#include "raster-cache-text-std.h"
-#include "raster-cache.h"
-#include "raster-modes.h"
+#include "maincpu.h"
+#include "raster-line.h"
+#include "snapshot.h"
 #include "ted-draw.h"
-#include "ted.h"
 #include "tedtypes.h"
-#include "types.h"
+#include "viewport.h"
 
+/* The dot counter and the TV's output position are separate.  A write to
+   $ff1e changes the former after one dot, never pixels already emitted.
+   CLOCK is the double CPU clock (four dots); sub is the dot within it.
+   Runs stop at latch, shift-register load, border and register events.
+   There is one rendering path, including lines without register writes. */
+typedef struct {
+    CLOCK clk;
+    unsigned int sub, h, x;
+    uint8_t control1, control2, scroll;
+    uint8_t bits, attr, character, pair;
+    uint8_t waiting_bits, waiting_attr, waiting_char;
+    uint8_t palette[5];
+    int border;
+    int pending_color, pending_counter;
+    uint8_t color_value, counter_value;
+    unsigned int delay;
+    uint8_t line[512];
+} ted_beam_t;
 
-/* The following tables are used to speed up the drawing.  We do not use
-   multi-dimensional arrays as we can optimize better this way...  */
+static ted_beam_t beam;
 
-/* foreground(7) | background(7) | nibble(4) -> 4 pixels.  */
-static uint32_t hr_table[128 * 128 * 16];
+/* Host-order byte masks.  They select colours, not precoloured characters:
+   a palette write can split even the two dots of a multicolour pixel. */
+static uint64_t mono[256], multi[4][256];
+static int tables_ready;
 
-/* mc flag(1) | idx(2) | byte(8) -> index into double-pixel table.  */
-static uint8_t mc_table[2 * 4 * 256];
-
-/* These functions draw the background from `start_pixel' to `end_pixel'.  */
-
-static void draw_std_background(unsigned int start_pixel,
-                                unsigned int end_pixel)
+static void build_tables(void)
 {
-    memset(ted.raster.draw_buffer_ptr + start_pixel,
-           ted.raster.idle_background_color,
-           end_pixel - start_pixel + 1);
-}
+    unsigned int b, x, c;
+    uint8_t bytes[8];
 
-/* If unaligned 32-bit access is not allowed, the graphics is stored in a
-   temporary aligned buffer, and later copied to the real frame buffer.  This
-   is ugly, but should be hopefully faster than accessing 8 bits at a time
-   anyway.  */
-
-#ifndef ALLOW_UNALIGNED_ACCESS
-static uint32_t _aligned_line_buffer[TED_SCREEN_XPIX / 2 + 1];
-static uint8_t *const aligned_line_buffer = (uint8_t *)_aligned_line_buffer;
-#endif
-
-/* Pointer to the start of the graphics area on the frame buffer.  */
-#define GFX_PTR()               \
-    (ted.raster.draw_buffer_ptr \
-     + (ted.screen_leftborderwidth + ted.raster.xsmooth))
-
-#ifdef ALLOW_UNALIGNED_ACCESS
-#define ALIGN_DRAW_FUNC(name, xs, xe) \
-    name(GFX_PTR(), (xs), (xe))
-#else
-#define ALIGN_DRAW_FUNC(name, xs, xe)          \
-    do {                                       \
-        name(aligned_line_buffer, (xs), (xe)); \
-        memcpy(GFX_PTR() + (xs) * 8,           \
-               aligned_line_buffer + (xs) * 8, \
-               ((xe) - (xs) + 1) * 8);         \
-    } while (0)
-#endif
-
-#ifdef ALLOW_UNALIGNED_ACCESS
-#define ALIGN_DRAW_FUNC_CACHE(name, xs, xe, cache_ptr) \
-    name(GFX_PTR(), (xs), (xe), (cache_ptr))
-#else
-#define ALIGN_DRAW_FUNC_CACHE(name, xs, xe, cache_ptr)      \
-    do {                                                    \
-        name(aligned_line_buffer, (xs), (xe), (cache_ptr)); \
-        memcpy(GFX_PTR() + (xs) * 8,                        \
-               aligned_line_buffer + (xs) * 8,              \
-               ((xe) - (xs) + 1) * 8);                      \
-    } while (0)
-#endif
-
-/*-----------------------------------------------------------------------*/
-
-inline static uint8_t get_char_data(uint8_t c, uint8_t col, int l, uint8_t *char_mem,
-                                 int bytes_per_char, int curpos, int index)
-{
-    uint8_t data;
-
-    if ((col & 0x80) && (!ted.cursor_visible)) {
-        data = 0;
-    } else {
-        if (!ted.reverse_mode && (c & 0x80)) {
-            data = char_mem[((c & 0x7f) * bytes_per_char) + (l)] ^ 0xff;
-        } else {
-            data = char_mem[((c) * bytes_per_char) + (l)];
-        }
+    if (tables_ready) {
+        return;
     }
-
-
-    if (curpos == index) {
-        data ^= 0xff;
-    }
-
-    return data;
-}
-
-inline static int cache_data_fill_text(uint8_t *dest,
-                                       const uint8_t *src,
-                                       const uint8_t *src2,
-                                       uint8_t *char_mem,
-                                       int bytes_per_char,
-                                       unsigned int length,
-                                       int l,
-                                       unsigned int *xs,
-                                       unsigned int *xe,
-                                       int no_check,
-                                       int curpos)
-{
-    unsigned int i;
-
-    if (no_check) {
-        *xs = 0;
-        *xe = length - 1;
-        for (i = 0; i < length; i++, src++, src2++) {
-            dest[i] = get_char_data(src[0], src2[0], l, char_mem,
-                                    bytes_per_char, curpos, i);
+    for (b = 0; b < 256; b++) {
+        for (x = 0; x < 8; x++) {
+            bytes[x] = (b & (0x80 >> x)) ? 255 : 0;
         }
-        return 1;
-    } else {
-        uint8_t b;
-
-        for (i = 0;
-             i < length && dest[i] == get_char_data(src[0], src2[0], l, char_mem,
-                                                    bytes_per_char, curpos, i);
-             i++, src++, src2++) {
-            /* do nothing */
-        }
-
-        if (i < length) {
-            *xs = *xe = i;
-
-            for (; i < length; i++, src++, src2++) {
-                if (dest[i] != (b = get_char_data(src[0], src2[0], l, char_mem,
-                                                  bytes_per_char, curpos, i))) {
-                    dest[i] = b;
-                    *xe = i;
-                }
+        memcpy(&mono[b], bytes, 8);
+        for (c = 0; c < 4; c++) {
+            for (x = 0; x < 8; x++) {
+                bytes[x] = ((b >> (6 - (x & ~1))) & 3) == c ? 255 : 0;
             }
-
-            return 1;
-        } else {
-            return 0;
+            memcpy(&multi[c][b], bytes, 8);
         }
     }
+    tables_ready = 1;
 }
 
-/*-----------------------------------------------------------------------*/
-
-/* FIXME: in the cache, we store the foreground bitmap values for the
-   characters, but we do not use them when drawing and this is slow!  */
-
-/* Standard text mode.  */
-
-static int get_std_text(raster_cache_t *cache, unsigned int *xs,
-                        unsigned int *xe, int rr)
+static uint64_t repeat_color(unsigned int c)
 {
-    int r, cursor_pos = -1;
-
-    if (ted.raster.background_color != cache->background_data[0]
-        || cache->chargen_ptr != ted.chargen_ptr) {
-        cache->background_data[0] = ted.raster.background_color;
-        cache->chargen_ptr = ted.chargen_ptr;
-        rr = 1;
-    }
-
-    if (ted.cursor_visible) {
-        int crsrpos = ted.crsrpos - ted.memptr;
-        if (crsrpos >= 0 && crsrpos < TED_SCREEN_TEXTCOLS) {
-            cursor_pos = crsrpos;
-        }
-    }
-
-    r = cache_data_fill_text(cache->foreground_data,
-                             ted.vbuf,
-                             ted.cbuf,
-                             ted.chargen_ptr,
-                             8,   /* FIXME */
-                             TED_SCREEN_TEXTCOLS,
-                             ted.draw_ycounter,
-                             xs, xe,
-                             rr,
-                             cursor_pos);
-    r |= raster_cache_data_fill(cache->color_data_1,
-                                ted.cbuf,
-                                TED_SCREEN_TEXTCOLS,
-                                xs, xe,
-                                rr);
-    r |= raster_cache_data_fill(cache->color_data_2,
-                                ted.vbuf,
-                                TED_SCREEN_TEXTCOLS,
-                                xs, xe,
-                                rr);
-
-
-
-    return r;
+    return UINT64_C(0x0101010101010101) * c;
 }
 
-/* without video cache */
-inline static void _draw_std_text(uint8_t *p, unsigned int xs, unsigned int xe)
+static unsigned int mode(void)
 {
-    uint32_t *table_ptr;
-    uint8_t *char_ptr;
-    unsigned int i;
-    int cursor_pos = -1;
+    return ((beam.control1 & 0x60) | (beam.control2 & 0x10)) >> 4;
+}
 
-    table_ptr = hr_table + (ted.raster.background_color << 4);
-    char_ptr = ted.chargen_ptr + ted.draw_ycounter;
+static int multicolor(void)
+{
+    return (beam.control2 & 0x10)
+           && ((beam.control1 & 0x60) || (beam.attr & 8));
+}
 
-    if (ted.cursor_visible) {
-        int crsrpos = ted.crsrpos - ted.memptr;
-        if (crsrpos >= 0 && crsrpos < TED_SCREEN_TEXTCOLS) {
-            cursor_pos = crsrpos;
+/* Read once into the video latch, before loading the pixel shift register.
+   CPU stores flush the pipeline first, so later RAM writes cannot alter a
+   byte already being shifted.  Address and row changes affect later reads. */
+static void fetch_cell(unsigned int cell)
+{
+    unsigned int index, address;
+
+    beam.waiting_char = beam.waiting_attr = beam.waiting_bits = 0;
+    if (cell >= TED_SCREEN_TEXTCOLS) {
+        if (ted.idle_state) {
+            beam.waiting_bits = (uint8_t)ted.idle_data;
         }
+        return;
     }
-
-    if (ted.reverse_mode) {
-        for (i = xs; i <= xe; i++) {
-            int d;
-            uint32_t *ptr = table_ptr + ((ted.cbuf[i] & 0x7f) << 11);
-
-            if ((ted.cbuf[i] & 0x80) && (!ted.cursor_visible)) {
-                d = 0;
-            } else {
-                d = *(char_ptr + ted.vbuf[i] * 8);
-            }
-            if ((int)i == cursor_pos) {
-                d ^= 0xff;
-            }
-            *((uint32_t *)p + i * 2) = *(ptr + (d >> 4));
-            *((uint32_t *)p + i * 2 + 1) = *(ptr + (d & 0xf));
+    if (ted.idle_state || !ted.character_fetch_on) {
+        /* No matrix/character fetch means no replacement colour attributes.
+           Preserve them through the vertical border as well as the horizontal
+           gap; otherwise the first scrolled display line acquires black dots. */
+        beam.waiting_attr = beam.attr;
+        beam.waiting_char = beam.character;
+        if (ted.idle_state) {
+            beam.waiting_bits = (uint8_t)ted.idle_data;
+        }
+        return;
+    }
+    beam.waiting_char = ted.vbuf[cell];
+    beam.waiting_attr = ted.cbuf[cell];
+    if (beam.control1 & 0x20) {
+        address = (((ted.memptr + cell) << 3) | ted.raster.ycounter) & 0x1fff;
+        if (ted.bitmap_ptr) {
+            beam.waiting_bits = ted.bitmap_ptr[address];
         }
     } else {
-        for (i = xs; i <= xe; i++) {
-            int d;
-            uint32_t *ptr = table_ptr + ((ted.cbuf[i] & 0x7f) << 11);
-
-            if ((ted.cbuf[i] & 0x80) && (!ted.cursor_visible)) {
-                d = (ted.vbuf[i] & 0x80 ? 0xff : 0x00);
-            } else {
-                d = *(char_ptr + (ted.vbuf[i] & 0x7f) * 8)
-                    ^ (ted.vbuf[i] & 0x80 ? 0xff : 0x00);
-            }
-            if ((int)i == cursor_pos) {
-                d ^= 0xff;
-            }
-            *((uint32_t *)p + i * 2) = *(ptr + (d >> 4));
-            *((uint32_t *)p + i * 2 + 1) = *(ptr + (d & 0xf));
+        index = beam.waiting_char;
+        if (beam.control1 & 0x40) {
+            index &= 0x3f;
+        } else if (!(beam.control2 & 0x80)) {
+            index &= 0x7f;
         }
+        if (ted.chargen_ptr) {
+            beam.waiting_bits = ted.chargen_ptr[(index << 3) | ted.raster.ycounter];
+        }
+    }
+    if (mode() == TED_NORMAL_TEXT_MODE && ted.cursor_visible
+        && ((ted.memptr + cell) & 0x3ff) == (unsigned int)ted.crsrpos) {
+        beam.waiting_bits ^= 0xff;
     }
 }
 
-static void draw_std_text(void)
+static void dot_events(void)
 {
-    ALIGN_DRAW_FUNC(_draw_std_text, 0, TED_SCREEN_TEXTCOLS - 1);
-}
+    unsigned int h = beam.h;
 
-/* with video cache */
-inline static void _draw_std_text_cached(uint8_t *p, unsigned int xs,
-                                         unsigned int xe,
-                                         raster_cache_t *cache)
-{
-    uint32_t *table_ptr;
-    uint8_t *foreground_data, *color_data, *vbuf;
-    unsigned int i;
-
-    table_ptr = hr_table + (cache->background_data[0] << 4);
-    foreground_data = cache->foreground_data; /* contains both vbuf and cbuf */
-    color_data = cache->color_data_1;
-    vbuf = cache->color_data_2;
-
-    for (i = xs; i <= xe; i++) {
-        int d;
-        uint32_t *ptr = table_ptr + ((color_data[i] & 0x7f) << 11);
-
-        if ((color_data[i] & 0x80) && (!ted.cursor_visible)) {
-            d = (vbuf[i] & 0x80 ? 0xff : 0x00);
+    if ((h & 7) == 0) {
+        beam.control1 = ted.regs[6];
+        beam.control2 = ted.regs[7];
+        beam.scroll = beam.control2 & 7;
+        if (h < 320) {
+            fetch_cell(h >> 3);
         } else {
-            d = foreground_data[i];
-        }
-
-        *((uint32_t *)p + i * 2) = *(ptr + (d >> 4));
-        *((uint32_t *)p + i * 2 + 1) = *(ptr + (d & 0xf));
-    }
-}
-
-static void draw_std_text_cached(raster_cache_t *cache, unsigned int xs,
-                                 unsigned int xe)
-{
-    ALIGN_DRAW_FUNC_CACHE(_draw_std_text_cached, xs, xe, cache);
-}
-
-#define DRAW_STD_TEXT_BYTE(p, b, f) \
-    do {                            \
-        if ((b) & 0x80) {           \
-            *(p) = (f);             \
-        }                           \
-        if ((b) & 0x40) {           \
-            *((p) + 1) = (f);       \
-        }                           \
-        if ((b) & 0x20) {           \
-            *((p) + 2) = (f);       \
-        }                           \
-        if ((b) & 0x10) {           \
-            *((p) + 3) = (f);       \
-        }                           \
-        if ((b) & 0x08) {           \
-            *((p) + 4) = (f);       \
-        }                           \
-        if ((b) & 0x04) {           \
-            *((p) + 5) = (f);       \
-        }                           \
-        if ((b) & 0x02) {           \
-            *((p) + 6) = (f);       \
-        }                           \
-        if ((b) & 0x01) {           \
-            *((p) + 7) = (f);       \
-        }                           \
-    } while (0)
-
-static void draw_std_text_foreground(unsigned int start_char, unsigned int end_char)
-{
-    unsigned int i;
-    uint8_t *char_ptr;
-    uint8_t *p;
-    int cursor_pos = -1;
-
-    char_ptr = ted.chargen_ptr + ted.draw_ycounter;
-    p = GFX_PTR() + 8 * start_char;
-
-    if (ted.cursor_visible) {
-        int crsrpos = ted.crsrpos - ted.memptr;
-        if (crsrpos >= 0 && crsrpos < TED_SCREEN_TEXTCOLS) {
-            cursor_pos = crsrpos;
+            fetch_cell(40);
         }
     }
-
-    if (ted.reverse_mode) {
-        for (i = start_char; i <= end_char; i++, p += 8) {
-            uint8_t b, f;
-
-            if ((ted.cbuf[i] & 0x80) && (!ted.cursor_visible)) {
-                b = 0;
-            } else {
-                b = char_ptr[ted.vbuf[i] * 8];
-            }
-            if ((int)i == cursor_pos) {
-                b ^= 0xff;
-            }
-            f = ted.cbuf[i] & 0x7f;
-
-            DRAW_STD_TEXT_BYTE(p, b, f);
-        }
-    } else {
-        for (i = start_char; i <= end_char; i++, p += 8) {
-            uint8_t b, f;
-
-            if ((ted.cbuf[i] & 0x80) && (!ted.cursor_visible)) {
-                b = (ted.vbuf[i] & 0x80 ? 0xff : 0x00);
-            } else {
-                b = char_ptr[(ted.vbuf[i] & 0x7f) * 8]
-                    ^ (ted.vbuf[i] & 0x80 ? 0xff : 0x00);
-            }
-            if ((int)i == cursor_pos) {
-                b ^= 0xff;
-            }
-            f = ted.cbuf[i] & 0x7f;
-
-            DRAW_STD_TEXT_BYTE(p, b, f);
+    if ((h == 0 && (ted.regs[7] & 8))
+        || (h == 8 && !(ted.regs[7] & 8))) {
+        if (!ted.raster.blank_enabled && !ted.raster.blank_this_line) {
+            beam.border = 0;
         }
     }
-}
-
-/*
-    Hires Bitmap mode.
-*/
-
-static int get_bitmap_data(raster_cache_t *cache, unsigned int *xs,
-                           unsigned int *xe, int rr)
-{
-    uint8_t data[TED_SCREEN_TEXTCOLS];
-    unsigned int i, j;
-
-    if (!ted.bitmap_dirty) {
-        return raster_cache_data_fill_1fff(cache->foreground_data,
-                                          ted.bitmap_ptr,
-                                          ted.bitmap_ptr + 0x1000,
-                                          ted.memptr * 8 + ted.draw_ycounter,
-                                          TED_SCREEN_TEXTCOLS, xs, xe, rr);
+    if ((h == 320 && (ted.regs[7] & 8))
+        || (h == 312 && !(ted.regs[7] & 8))) {
+        beam.border = 1;
     }
-    for (i = 0, j = ((ted.memptr << 3) + ted.draw_ycounter) & 0x1fff;
-         i < TED_SCREEN_TEXTCOLS; i++, j = (j + 8) & 0x1fff) {
-        data[i] = ted.bitmap_latched[i] ? ted.bitmap_data[i] : ted.bitmap_ptr[j];
-    }
-    return raster_cache_data_fill(cache->foreground_data, data,
-                                  TED_SCREEN_TEXTCOLS, xs, xe, rr);
-}
-
-static int get_hires_bitmap(raster_cache_t *cache, unsigned int *xs,
-                            unsigned int *xe, int rr)
-{
-    int r;
-
-    r = raster_cache_data_fill_nibbles(cache->color_data_1,
-                                       cache->background_data,
-                                       ted.vbuf,
-                                       TED_SCREEN_TEXTCOLS,
-                                       1,
-                                       xs, xe,
-                                       rr);
-    r |= raster_cache_data_fill(cache->color_data_2,
-                                ted.cbuf,
-                                TED_SCREEN_TEXTCOLS,
-                                xs, xe,
-                                rr);
-    r |= get_bitmap_data(cache, xs, xe, rr);
-    return r;
-}
-
-inline static void _draw_hires_bitmap(uint8_t *p, unsigned int xs,
-                                      unsigned int xe)
-{
-    uint8_t *bmptr;
-    unsigned int i, j;
-    uint32_t *ptr;
-
-    bmptr = ted.bitmap_ptr;
-
-    for (j = ((ted.memptr << 3) + ted.draw_ycounter + xs * 8) & 0x1fff, i = xs;
-         i <= xe; i++, j = (j + 8) & 0x1fff) {
-        int d;
-
-        ptr = hr_table
-              + ((ted.cbuf[i] & 0x07) << 15) + ((ted.vbuf[i] & 0xf0) << 7)
-              + ((ted.cbuf[i] & 0x70) << 4) + ((ted.vbuf[i] & 0x0f) << 4);
-
-        d = ted.bitmap_latched[i] ? ted.bitmap_data[i] : bmptr[j];
-        *((uint32_t *)p + i * 2) = *(ptr + (d >> 4));
-        *((uint32_t *)p + i * 2 + 1) = *(ptr + (d & 0xf));
-    }
-}
-
-/* Overscan color in HIRES is determined by last char of previous line: the
-   color of its 0 pixels, the low nibble of the video matrix with the
-   luminance in bits 4-6 of the attribute, as in `_draw_hires_bitmap()'.  */
-inline static uint8_t hires_bitmap_overscan_color(void)
-{
-    return (ted.cbuf[TED_SCREEN_TEXTCOLS - 1] & 0x70)
-           | (ted.vbuf[TED_SCREEN_TEXTCOLS - 1] & 0x0f);
-}
-
-static void draw_hires_bitmap(void)
-{
-    ALIGN_DRAW_FUNC(_draw_hires_bitmap, 0, TED_SCREEN_TEXTCOLS - 1);
-
-    ted.raster.idle_background_color = hires_bitmap_overscan_color();
-}
-
-static void draw_hires_bitmap_cached(raster_cache_t *cache, unsigned int xs,
-                                     unsigned int xe)
-{
-    ALIGN_DRAW_FUNC(_draw_hires_bitmap, xs, xe);
-
-    if (xe == TED_SCREEN_TEXTCOLS - 1) {
-        ted.raster.idle_background_color = hires_bitmap_overscan_color();
-    }
-}
-
-static void draw_hires_bitmap_foreground(unsigned int start_char,
-                                         unsigned int end_char)
-{
-    ALIGN_DRAW_FUNC(_draw_hires_bitmap, start_char, end_char);
-}
-
-/*
-    Multicolor text mode.
-*/
-
-static int get_mc_text(raster_cache_t *cache, unsigned int *xs,
-                       unsigned int *xe, int rr)
-{
-    int r;
-
-    if (ted.raster.background_color != cache->background_data[0]
-        || cache->color_data_1[0] != ted.ext_background_color[0]
-        || cache->color_data_1[1] != ted.ext_background_color[1]
-        || cache->chargen_ptr != ted.chargen_ptr) {
-        cache->background_data[0] = ted.raster.background_color;
-        cache->color_data_1[0] = ted.ext_background_color[0];
-        cache->color_data_1[1] = ted.ext_background_color[1];
-        cache->chargen_ptr = ted.chargen_ptr;
-        rr = 1;
-    }
-
-    r = raster_cache_data_fill_text(cache->foreground_data,
-                                    ted.vbuf,
-                                    ted.chargen_ptr + ted.draw_ycounter,
-                                    TED_SCREEN_TEXTCOLS,
-                                    xs, xe,
-                                    rr);
-    r |= raster_cache_data_fill(cache->color_data_3,
-                                ted.cbuf,
-                                TED_SCREEN_TEXTCOLS,
-                                xs, xe,
-                                rr);
-    return r;
-}
-
-inline static void _draw_mc_text(uint8_t *p, unsigned int xs, unsigned int xe)
-{
-    uint8_t c[12];
-    uint8_t *char_ptr;
-    uint16_t *ptmp;
-    unsigned int i, v, d;
-
-    char_ptr = ted.chargen_ptr + ted.draw_ycounter;
-
-    c[1] = c[0] = ted.raster.background_color;
-    c[3] = c[2] = ted.ext_background_color[0];
-    c[5] = c[4] = ted.ext_background_color[1];
-    c[11] = c[8] = ted.raster.background_color;
-
-    ptmp = (uint16_t *)(p + xs * 8);
-    for (i = xs; i <= xe; i++) {
-/*         unsigned int d = (*(char_ptr + ted.vbuf[i] * 8))
-                          | ((ted.cbuf[i] & 0x8) << 5); */
-        v = ted.vbuf[i] & (ted.reverse_mode ? 0xff : 0x7f);
-        d = char_ptr[v * 8] | ((ted.cbuf[i] & 0x8) << 5);
-
-        c[10] = c[9] = c[7] = c[6] = ted.cbuf[i] & 0x77;
-
-        ptmp[0] = ((uint16_t *)c)[mc_table[d]];
-        ptmp[1] = ((uint16_t *)c)[mc_table[0x200 + d]];
-        ptmp[2] = ((uint16_t *)c)[mc_table[0x400 + d]];
-        ptmp[3] = ((uint16_t *)c)[mc_table[0x600 + d]];
-        ptmp += 4;
-    }
-}
-
-static void draw_mc_text(void)
-{
-    ALIGN_DRAW_FUNC(_draw_mc_text, 0, TED_SCREEN_TEXTCOLS - 1);
-}
-
-static void draw_mc_text_cached(raster_cache_t *cache, unsigned int xs,
-                                unsigned int xe)
-{
-    ALIGN_DRAW_FUNC(_draw_mc_text, xs, xe);
-}
-
-/* FIXME: aligned/unaligned versions.  */
-#define DRAW_MC_BYTE(p, b, f1, f2, f3)          \
-    do {                                        \
-        if ((b) & 0x80) {                       \
-            if ((b) & 0x40) {                   \
-                *(p) = *((p) + 1) = (f3);       \
-            } else {                            \
-                *(p) = *((p) + 1) = (f2);       \
-            }                                   \
-        } else if ((b) & 0x40) {                \
-            *(p) = *((p) + 1) = (f1);           \
-        }                                       \
-                                                \
-        if ((b) & 0x20) {                       \
-            if ((b) & 0x10) {                   \
-                *((p) + 2) = *((p) + 3) = (f3); \
-            } else {                            \
-                *((p) + 2) = *((p) + 3) = (f2); \
-            }                                   \
-        } else if ((b) & 0x10) {                \
-            *((p) + 2) = *((p) + 3) = (f1);     \
-        }                                       \
-                                                \
-        if ((b) & 0x08) {                       \
-            if ((b) & 0x04) {                   \
-                *((p) + 4) = *((p) + 5) = (f3); \
-            } else {                            \
-                *((p) + 4) = *((p) + 5) = (f2); \
-            }                                   \
-        } else if ((b) & 0x04) {                \
-            *((p) + 4) = *((p) + 5) = (f1);     \
-        }                                       \
-                                                \
-        if ((b) & 0x02) {                       \
-            if ((b) & 0x01) {                   \
-                *((p) + 6) = *((p) + 7) = (f3); \
-            } else {                            \
-                *((p) + 6) = *((p) + 7) = (f2); \
-            }                                   \
-        } else if ((b) & 0x01) {                \
-            *((p) + 6) = *((p) + 7) = (f1);     \
-        }                                       \
-    } while (0)
-
-static void draw_mc_text_foreground(unsigned int start_char, unsigned int end_char)
-{
-    uint8_t *char_ptr;
-    uint8_t c1, c2;
-    uint8_t *p;
-    unsigned int i;
-
-    char_ptr = ted.chargen_ptr + ted.draw_ycounter;
-    c1 = ted.ext_background_color[0];
-    c2 = ted.ext_background_color[1];
-    p = GFX_PTR() + 8 * start_char;
-
-    for (i = start_char; i <= end_char; i++, p += 8) {
-        uint8_t b, c;
-
-        b = *(char_ptr + ted.vbuf[i] * 8);
-        c = ted.cbuf[i];
-
-        if (c & 0x8) {
-            uint8_t c3;
-
-            c3 = c & 0x77;
-            DRAW_MC_BYTE (p, b, c1, c2, c3);
-        } else {
-            uint8_t c3;
-
-            c3 = c & 0x77;
-            DRAW_STD_TEXT_BYTE(p, b, c3);
+    if ((h < 320 || h >= 440) && (h & 7) == beam.scroll) {
+        beam.bits = beam.waiting_bits;
+        /* Empty pre-display shifts drain pixel data, not the colour
+           attributes of the last displayed cell.  In hires bitmap mode
+           those attributes still select the zero-bit colour until the
+           first new cell is loaded, including a horizontal scroll gap. */
+        if (h < 320) {
+            beam.attr = beam.waiting_attr;
+            beam.character = beam.waiting_char;
         }
+        beam.pair = 0;
     }
 }
 
-/* Multicolor Bitmap Mode.  */
-
-static int get_mc_bitmap(raster_cache_t *cache, unsigned int *xs,
-                         unsigned int *xe, int rr)
+static uint64_t pixel_colors(void)
 {
-    int r;
+    unsigned int m = mode();
+    unsigned int b = beam.bits;
+    unsigned int c0 = beam.palette[0], c1, c2, c3;
 
-    if (ted.raster.background_color != cache->background_data[0]
-        || ted.ext_background_color[0] != cache->color_data_3[0]) {
-        cache->background_data[0] = ted.raster.background_color;
-        cache->color_data_3[0] = ted.ext_background_color[0];
-        rr = 1;
+    if (beam.border && !ted.raster.border_disable) {
+        return repeat_color(beam.palette[4]);
     }
-
-    r = raster_cache_data_fill(cache->color_data_1,
-                               ted.vbuf,
-                               TED_SCREEN_TEXTCOLS,
-                               xs, xe,
-                               rr);
-    r |= raster_cache_data_fill(cache->color_data_2,
-                                ted.cbuf,
-                                TED_SCREEN_TEXTCOLS,
-                                xs, xe,
-                                rr);
-    r |= get_bitmap_data(cache, xs, xe, rr);
-    return r;
-}
-
-inline static void _draw_mc_bitmap(uint8_t *p, unsigned int xs, unsigned int xe)
-{
-    uint8_t *bmptr, *ptmp;
-    uint8_t c[4];
-    unsigned int i, j;
-
-    bmptr = ted.bitmap_ptr;
-
-    c[0] = ted.raster.background_color;
-    c[3] = ted.ext_background_color[0];
-
-    ptmp = p + xs * 8;
-    for (j = ((ted.memptr << 3) + ted.draw_ycounter + xs * 8) & 0x1fff,
-         i = xs; i <= xe; i++, j = (j + 8) & 0x1fff) {
-        unsigned int d;
-
-        d = ted.bitmap_latched[i] ? ted.bitmap_data[i] : bmptr[j];
-
-        c[1] = (ted.vbuf[i] >> 4) + ((ted.cbuf[i] & 0x07) << 4);
-        c[2] = (ted.vbuf[i] & 0x0f) + (ted.cbuf[i] & 0x70);
-
-        ptmp[1] = ptmp[0] = c[mc_table[0x100 + d]];
-        ptmp[3] = ptmp[2] = c[mc_table[0x300 + d]];
-        ptmp[5] = ptmp[4] = c[mc_table[0x500 + d]];
-        ptmp[7] = ptmp[6] = c[mc_table[0x700 + d]];
-        ptmp += 8;
-    }
-}
-
-static void draw_mc_bitmap(void)
-{
-    ALIGN_DRAW_FUNC(_draw_mc_bitmap, 0, TED_SCREEN_TEXTCOLS - 1);
-}
-
-static void draw_mc_bitmap_cached(raster_cache_t *cache, unsigned int xs,
-                                  unsigned int xe)
-{
-    ALIGN_DRAW_FUNC(_draw_mc_bitmap, xs, xe);
-}
-
-static void draw_mc_bitmap_foreground(unsigned int start_char,
-                                      unsigned int end_char)
-{
-    uint8_t *p;
-    uint8_t *bmptr;
-    unsigned int i, j;
-
-    p = GFX_PTR() + 8 * start_char;
-    bmptr = ted.bitmap_ptr;
-
-    for (j = ((ted.memptr << 3) + ted.draw_ycounter + 8 * start_char) & 0x1fff,
-         i = start_char; i <= end_char; j = (j + 8) & 0x1fff, i++, p += 8) {
-        uint8_t c1, c2, c3;
-        uint8_t b;
-
-        c1 = (ted.vbuf[i] >> 4) + ((ted.cbuf[i] & 0x07) << 4);
-        c2 = (ted.vbuf[i] & 0x0f) + (ted.cbuf[i] & 0x70);
-        c3 = ted.ext_background_color[0];
-        b = ted.bitmap_latched[i] ? ted.bitmap_data[i] : bmptr[j];
-
-        DRAW_MC_BYTE(p, b, c1, c2, c3);
-    }
-}
-
-/* Extended Text Mode.  */
-
-static int get_ext_text(raster_cache_t *cache, unsigned int *xs,
-                        unsigned int *xe, int rr)
-{
-    int r;
-
-    if (cache->color_data_2[0] != ted.raster.background_color
-        || cache->color_data_2[1] != ted.ext_background_color[0]
-        || cache->color_data_2[2] != ted.ext_background_color[1]
-        || cache->color_data_2[3] != ted.ext_background_color[2]
-        || cache->chargen_ptr != ted.chargen_ptr) {
-        cache->color_data_2[0] = ted.raster.background_color;
-        cache->color_data_2[1] = ted.ext_background_color[0];
-        cache->color_data_2[2] = ted.ext_background_color[1];
-        cache->color_data_2[3] = ted.ext_background_color[2];
-        cache->chargen_ptr = ted.chargen_ptr;
-        rr = 1;
-    }
-
-    r = raster_cache_data_fill_text_ext(cache->foreground_data,
-                                        cache->color_data_3,
-                                        ted.vbuf,
-                                        ted.chargen_ptr,
-                                        8,
-                                        TED_SCREEN_TEXTCOLS,
-                                        ted.draw_ycounter,
-                                        xs, xe,
-                                        rr);
-
-    r |= raster_cache_data_fill(cache->color_data_1,
-                                ted.cbuf,
-                                TED_SCREEN_TEXTCOLS,
-                                xs, xe,
-                                rr);
-    return r;
-}
-
-inline static void _draw_ext_text(uint8_t *p, unsigned int xs, unsigned int xe)
-{
-    uint8_t *char_ptr;
-    unsigned int i;
-
-    char_ptr = ted.chargen_ptr + ted.draw_ycounter;
-
-    for (i = xs; i <= xe; i++) {
-        uint32_t *ptr;
-        int bg_idx;
-        int d;
-
-        ptr = hr_table + ((ted.cbuf[i] & 0x7f) << 11);
-        bg_idx = ted.vbuf[i] >> 6;
-        d = *(char_ptr + (ted.vbuf[i] & 0x3f) * 8);
-
-        if (bg_idx == 0) {
-            ptr += ted.raster.background_color << 4;
-        } else {
-            ptr += ted.ext_background_color[bg_idx - 1] << 4;
-        }
-
-        *((uint32_t *)p + 2 * i) = *(ptr + (d >> 4));
-        *((uint32_t *)p + 2 * i + 1) = *(ptr + (d & 0xf));
-    }
-}
-
-static void draw_ext_text(void)
-{
-    ALIGN_DRAW_FUNC(_draw_ext_text, 0, TED_SCREEN_TEXTCOLS - 1);
-}
-
-static void draw_ext_text_cached(raster_cache_t *cache, unsigned int xs,
-                                 unsigned int xe)
-{
-    ALIGN_DRAW_FUNC(_draw_ext_text, xs, xe);
-}
-
-/* FIXME: This is *slow* and might not be 100% correct.  */
-static void draw_ext_text_foreground(unsigned int start_char,
-                                     unsigned int end_char)
-{
-    unsigned int i;
-    uint8_t *char_ptr;
-    uint8_t *p;
-
-    char_ptr = ted.chargen_ptr + ted.draw_ycounter;
-    p = GFX_PTR() + 8 * start_char;
-
-    for (i = start_char; i <= end_char; i++, p += 8) {
-        uint8_t b;
-        uint8_t f;
-        int bg_idx;
-
-        b = char_ptr[(ted.vbuf[i] & 0x3f) * 8];
-        f = ted.cbuf[i] & 0x7f;
-        bg_idx = ted.vbuf[i] >> 6;
-
-        if (bg_idx > 0) {
-            p[7] = p[6] = p[5] = p[4] = p[3] = p[2] = p[1] = p[0] = ted.ext_background_color[bg_idx - 1];
-        }
-
-        DRAW_STD_TEXT_BYTE(p, b, f);
-    }
-}
-
-/* Illegal mode.  Everything is black.  */
-
-static int get_black(raster_cache_t *cache, unsigned int *xs,
-                     unsigned int *xe, int r)
-{
-    /* Let's simplify here: if also the previous time we had the Black Mode,
-       nothing has changed.  If we had not, the whole line has changed.  */
-
-    if (r) {
-        *xs = 0;
-        *xe = TED_SCREEN_TEXTCOLS - 1;
-    }
-
-    return r;
-}
-
-static void draw_black(void)
-{
-    uint8_t *p;
-
-    p = GFX_PTR();
-
-    memset(p, 0, TED_SCREEN_TEXTCOLS * 8);
-}
-
-static void draw_black_cached(raster_cache_t *cache, unsigned int xs,
-                              unsigned int xe)
-{
-    uint8_t *p;
-
-    p = GFX_PTR();
-
-    memset(p, 0, TED_SCREEN_TEXTCOLS * 8);
-}
-
-static void draw_black_foreground(unsigned int start_char,
-                                  unsigned int end_char)
-{
-    uint8_t *p;
-
-    p = GFX_PTR() + 8 * start_char;
-
-    memset(p, 0, (end_char - start_char + 1) * 8);
-}
-
-
-/* Idle state.  */
-
-static int get_idle(raster_cache_t *cache, unsigned int *xs, unsigned int *xe,
-                    int rr)
-{
-    if (rr
-        || ted.raster.background_color != cache->color_data_1[0]
-        || ted.idle_data != cache->foreground_data[0]) {
-        cache->color_data_1[0] = ted.raster.background_color;
-        cache->foreground_data[0] = (uint8_t)ted.idle_data;
-        *xs = 0;
-        *xe = TED_SCREEN_TEXTCOLS - 1;
-        return 1;
-    } else {
+    if (TED_IS_ILLEGAL_MODE(m)) {
         return 0;
     }
-}
-
-inline static void _draw_idle(unsigned int xs, unsigned int xe)
-{
-    uint8_t *p;
-    uint8_t d = 0;
-    unsigned int i;
-
-    if (!ted.raster.blank_enabled) {
-        d = (uint8_t)ted.idle_data;
-    }
-
-#ifdef ALLOW_UNALIGNED_ACCESS
-    p = GFX_PTR();
-#else
-    p = aligned_line_buffer;
-#endif
-
-    if (TED_IS_ILLEGAL_MODE(ted.raster.video_mode)) {
-        memset(p, 0, TED_SCREEN_XPIX);
+    if (m == TED_HIRES_BITMAP_MODE) {
+        c0 = (beam.character & 15) | (beam.attr & 0x70);
+        c1 = (beam.character >> 4) | ((beam.attr & 7) << 4);
+    } else if (m == TED_MULTICOLOR_BITMAP_MODE) {
+        c1 = (beam.character >> 4) | ((beam.attr & 7) << 4);
+        c2 = (beam.character & 15) | (beam.attr & 0x70);
+        c3 = beam.palette[1];
+        return (multi[0][b] & repeat_color(c0))
+             | (multi[1][b] & repeat_color(c1))
+             | (multi[2][b] & repeat_color(c2))
+             | (multi[3][b] & repeat_color(c3));
+    } else if (m == TED_MULTICOLOR_TEXT_MODE && (beam.attr & 8)) {
+        return (multi[0][b] & repeat_color(c0))
+             | (multi[1][b] & repeat_color(beam.palette[1]))
+             | (multi[2][b] & repeat_color(beam.palette[2]))
+             | (multi[3][b] & repeat_color(beam.attr & 0x77));
     } else {
-        /* The foreground color is always black (0).  */
-        unsigned int offs;
-        uint32_t c1, c2;
-
-        offs = ted.raster.idle_background_color << 4;
-        c1 = *(hr_table + offs + (d >> 4));
-        c2 = *(hr_table + offs + (d & 0xf));
-
-        for (i = xs * 8; i <= xe * 8; i += 8) {
-            *((uint32_t *)(p + i)) = c1;
-            *((uint32_t *)(p + i + 4)) = c2;
-        }
-    }
-
-#ifndef ALLOW_UNALIGNED_ACCESS
-    memcpy(GFX_PTR(), aligned_line_buffer + xs * 8, (xe - xs + 1) * 8);
-#endif
-}
-
-static void draw_idle(void)
-{
-    _draw_idle(0, TED_SCREEN_TEXTCOLS - 1);
-}
-
-static void draw_idle_cached(raster_cache_t *cache, unsigned int xs,
-                             unsigned int xe)
-{
-    _draw_idle(xs, xe);
-}
-
-static void draw_idle_foreground(unsigned int start_char,
-                                 unsigned int end_char)
-{
-    uint8_t *p;
-    uint8_t c;
-    uint8_t d = 0;
-    unsigned int i;
-
-    p = GFX_PTR();
-    c = 0;
-    if (!ted.raster.blank_enabled) {
-        d = (uint8_t)ted.idle_data;
-    }
-
-    for (i = start_char; i <= end_char; i++) {
-        DRAW_STD_TEXT_BYTE(p + i * 8, d, c);
-    }
-}
-
-static void setup_modes(void)
-{
-    raster_modes_set(ted.raster.modes, TED_NORMAL_TEXT_MODE,
-                     get_std_text,
-                     draw_std_text_cached,
-                     draw_std_text,
-                     draw_std_background,
-                     draw_std_text_foreground);
-
-    raster_modes_set(ted.raster.modes, TED_MULTICOLOR_TEXT_MODE,
-                     get_mc_text,
-                     draw_mc_text_cached,
-                     draw_mc_text,
-                     draw_std_background,
-                     draw_mc_text_foreground);
-
-    raster_modes_set(ted.raster.modes, TED_HIRES_BITMAP_MODE,
-                     get_hires_bitmap,
-                     draw_hires_bitmap_cached,
-                     draw_hires_bitmap,
-                     draw_std_background,
-                     draw_hires_bitmap_foreground);
-
-    raster_modes_set(ted.raster.modes, TED_MULTICOLOR_BITMAP_MODE,
-                     get_mc_bitmap,
-                     draw_mc_bitmap_cached,
-                     draw_mc_bitmap,
-                     draw_std_background,
-                     draw_mc_bitmap_foreground);
-
-    raster_modes_set(ted.raster.modes, TED_EXTENDED_TEXT_MODE,
-                     get_ext_text,
-                     draw_ext_text_cached,
-                     draw_ext_text,
-                     draw_std_background,
-                     draw_ext_text_foreground);
-
-    raster_modes_set(ted.raster.modes, TED_IDLE_MODE,
-                     get_idle,
-                     draw_idle_cached,
-                     draw_idle,
-                     draw_std_background,
-                     draw_idle_foreground);
-
-    raster_modes_set(ted.raster.modes, TED_ILLEGAL_TEXT_MODE,
-                     get_black,
-                     draw_black_cached,
-                     draw_black,
-                     draw_std_background,
-                     draw_black_foreground);
-
-    raster_modes_set(ted.raster.modes, TED_ILLEGAL_BITMAP_MODE_1,
-                     get_black,
-                     draw_black_cached,
-                     draw_black,
-                     draw_std_background,
-                     draw_black_foreground);
-
-    raster_modes_set(ted.raster.modes, TED_ILLEGAL_BITMAP_MODE_2,
-                     get_black,
-                     draw_black_cached,
-                     draw_black,
-                     draw_std_background,
-                     draw_black_foreground);
-}
-
-/* Initialize the drawing tables.  */
-static void init_drawing_tables(void)
-{
-    uint32_t i;
-    unsigned int f, b;
-    const uint8_t tmptable[4] = { 0, 4, 5, 3 };
-
-    for (i = 0; i <= 0xf; i++) {
-        for (f = 0; f <= 0x7f; f++) {
-            for (b = 0; b <= 0x7f; b++) {
-                uint8_t fp, bp;
-                uint8_t *p;
-                int offset;
-
-                fp = f;
-                bp = b;
-                offset = (f << 11) | (b << 4);
-                p = (uint8_t *)(hr_table + offset + i);
-
-                *p = i & 0x8 ? fp : bp;
-                *(p + 1) = i & 0x4 ? fp : bp;
-                *(p + 2) = i & 0x2 ? fp : bp;
-                *(p + 3) = i & 0x1 ? fp : bp;
+        c1 = beam.attr & (m == TED_MULTICOLOR_TEXT_MODE ? 0x77 : 0x7f);
+        if (m == TED_EXTENDED_TEXT_MODE) {
+            c0 = beam.palette[beam.character >> 6];
+        } else if (m == TED_NORMAL_TEXT_MODE) {
+            if ((beam.attr & 0x80) && !ted.cursor_visible) {
+                b = 0;
+            }
+            if (!(beam.control2 & 0x80) && (beam.character & 0x80)) {
+                b ^= 0xff;
             }
         }
     }
+    return (mono[b] & repeat_color(c1)) | (~mono[b] & repeat_color(c0));
+}
 
-    for (i = 0; i <= 0xff; i++) {
-        mc_table[i + 0x100] = (uint8_t)(i >> 6);
-        mc_table[i + 0x300] = (uint8_t)((i >> 4) & 0x3);
-        mc_table[i + 0x500] = (uint8_t)((i >> 2) & 0x3);
-        mc_table[i + 0x700] = (uint8_t)(i & 0x3);
-        mc_table[i] = tmptable[i >> 6];
-        mc_table[i + 0x200] = tmptable[(i >> 4) & 0x3];
-        mc_table[i + 0x400] = tmptable[(i >> 2) & 0x3];
-        mc_table[i + 0x600] = tmptable[i & 0x3];
+/* Emit at most eight dots.  memcpy handles unaligned output on all hosts. */
+static void emit(unsigned int n)
+{
+    uint64_t pixels = pixel_colors();
+    unsigned int skip = multicolor() ? beam.pair : 0;
+    unsigned int x = beam.x;
+    int dest = (int)x + ted.screen_leftborderwidth - 64;
+    unsigned int count = n;
+
+    if (dest < 0) {
+        unsigned int cut = (unsigned int)-dest;
+        if (cut > count) {
+            cut = count;
+        }
+        skip += cut;
+        count -= cut;
+        dest += cut;
     }
+    if (dest >= 0 && dest < (int)sizeof(beam.line) && count) {
+        if (count > sizeof(beam.line) - dest) {
+            count = sizeof(beam.line) - dest;
+        }
+        memcpy(beam.line + dest, (uint8_t *)&pixels + skip, count);
+    }
+    if (multicolor()) {
+        unsigned int shift = (n + beam.pair) & ~1U;
+        beam.bits = shift >= 8 ? 0 : (uint8_t)(beam.bits << shift);
+    } else {
+        beam.bits = n >= 8 ? 0 : (uint8_t)(beam.bits << n);
+    }
+    beam.pair = (beam.pair + n) & 1;
+    beam.x += n;
+    if (beam.x > 576) { beam.x = 576; }
+    beam.h += n;
+    if (beam.h == 456 || beam.h == 512) {
+        beam.h = 0;
+    }
+    beam.sub += n;
+    beam.clk += beam.sub >> 2;
+    beam.sub &= 3;
+}
+
+/* No register or memory operation occurs inside a sync interval.  In its
+   interior a complete shifter load can cross the next mode latch: that
+   latch sees the same controls.  Fetch the following byte before leaving
+   the interval, just as the dot event loop does. */
+static int equal_bytes(const uint8_t *p, unsigned int count, uint8_t value)
+{
+    uint64_t word, repeated = repeat_color(value);
+
+    while (count >= 8) {
+        memcpy(&word, p, 8);
+        if (word != repeated) { return 0; }
+        p += 8;
+        count -= 8;
+    }
+    while (count--) {
+        if (*p++ != value) { return 0; }
+    }
+    return 1;
+}
+
+static void emit_cells(unsigned int count)
+{
+    uint64_t pixels = pixel_colors();
+    unsigned int cell = beam.h >> 3;
+    unsigned int m = mode();
+    unsigned int i, b, attr, chr, c0, c1;
+    unsigned int row = ted.raster.ycounter;
+    uint8_t *p = beam.line + beam.x + ted.screen_leftborderwidth - 64;
+    uint8_t *font = ted.chargen_ptr;
+    uint8_t *bitmap = ted.bitmap_ptr;
+    uint64_t bg = repeat_color(beam.palette[0]);
+    memcpy(p, &pixels, 8);
+    if (beam.border && !ted.raster.border_disable) {
+        memset(p + 8, beam.palette[4], (count - 1) * 8);
+    } else if (!(m & 2) && count >= 4 && !ted.idle_state && ted.character_fetch_on
+               && (!ted.cursor_visible || ted.crsrpos - ted.memptr <= (int)cell
+                   || ted.crsrpos - ted.memptr >= (int)(cell + count))
+               && equal_bytes(ted.vbuf + cell + 1, count - 1, ted.vbuf[cell + 1])
+               && equal_bytes(ted.cbuf + cell + 1, count - 1, ted.cbuf[cell + 1])) {
+        /* Repeated shifter loads, such as spaces and solid text rows, have
+           identical pixels.  Decode once, while retaining the final latch. */
+        fetch_cell(cell + 1);
+        beam.bits = beam.waiting_bits;
+        beam.attr = beam.waiting_attr;
+        beam.character = beam.waiting_char;
+        pixels = pixel_colors();
+        if (pixels == repeat_color(*(uint8_t *)&pixels)) {
+            memset(p + 8, *(uint8_t *)&pixels, (count - 1) * 8);
+        } else {
+            for (i = 1; i < count; i++) { memcpy(p + i * 8, &pixels, 8); }
+        }
+    } else if (m == TED_NORMAL_TEXT_MODE && !ted.idle_state && ted.character_fetch_on && font) {
+        unsigned int mask = (beam.control2 & 0x80) ? 0xff : 0x7f;
+        int cursor = ted.cursor_visible ? (ted.crsrpos - ted.memptr) & 0x3ff : -1;
+        font += row;
+        memset(p + 8, beam.palette[0], (count - 1) * 8);
+        for (i = 1; i < count; i++) {
+            chr = ted.vbuf[cell + i];
+            b = font[(chr & mask) << 3];
+            if (!b && ((mask & 0x80) || !(chr & 0x80)) && (int)(cell + i) != cursor) {
+                continue;
+            }
+            attr = ted.cbuf[cell + i];
+            if ((attr & 0x80) && !ted.cursor_visible) { b = 0; }
+            if (!(mask & 0x80) && (chr & 0x80)) { b ^= 255; }
+            if ((int)(cell + i) == cursor) { b ^= 255; }
+            pixels = bg ^ (mono[b] & (bg ^ repeat_color(attr & 0x7f)));
+            memcpy(p + i * 8, &pixels, 8);
+        }
+    } else if (m == TED_MULTICOLOR_TEXT_MODE && !ted.idle_state && ted.character_fetch_on && font) {
+        unsigned int mask = (beam.control2 & 0x80) ? 0xff : 0x7f;
+        uint64_t bg1 = bg ^ repeat_color(beam.palette[1]);
+        uint64_t bg2 = bg ^ repeat_color(beam.palette[2]);
+        font += row;
+        for (i = 1; i < count; i++) {
+            chr = ted.vbuf[cell + i];
+            attr = ted.cbuf[cell + i];
+            b = font[(chr & mask) << 3];
+            pixels = bg ^ ((attr & 8)
+                ? (multi[1][b] & bg1) ^ (multi[2][b] & bg2)
+                    ^ (multi[3][b] & (bg ^ repeat_color(attr & 0x77)))
+                : (mono[b] & (bg ^ repeat_color(attr & 0x77))));
+            memcpy(p + i * 8, &pixels, 8);
+        }
+    } else if (m == TED_EXTENDED_TEXT_MODE && !ted.idle_state && ted.character_fetch_on && font) {
+        uint64_t backgrounds[4];
+        for (i = 0; i < 4; i++) { backgrounds[i] = repeat_color(beam.palette[i]); }
+        font += row;
+        for (i = 1; i < count; i++) {
+            chr = ted.vbuf[cell + i];
+            attr = ted.cbuf[cell + i];
+            b = font[(chr & 0x3f) << 3];
+            bg = backgrounds[chr >> 6];
+            pixels = bg ^ (mono[b] & (bg ^ repeat_color(attr & 0x7f)));
+            memcpy(p + i * 8, &pixels, 8);
+        }
+    } else if (m == TED_HIRES_BITMAP_MODE && !ted.idle_state && ted.character_fetch_on && bitmap) {
+        unsigned int address = ((ted.memptr + cell + 1) << 3) | row;
+        for (i = 1; i < count; i++, address += 8) {
+            chr = ted.vbuf[cell + i];
+            attr = ted.cbuf[cell + i];
+            b = bitmap[address & 0x1fff];
+            c0 = (chr & 15) | (attr & 0x70);
+            c1 = (chr >> 4) | ((attr & 7) << 4);
+            pixels = repeat_color(c0) ^ (mono[b] & repeat_color(c0 ^ c1));
+            memcpy(p + i * 8, &pixels, 8);
+        }
+    } else if (m == TED_MULTICOLOR_BITMAP_MODE && !ted.idle_state && ted.character_fetch_on && bitmap) {
+        unsigned int address = ((ted.memptr + cell + 1) << 3) | row;
+        uint64_t bg3 = bg ^ repeat_color(beam.palette[1]);
+        for (i = 1; i < count; i++, address += 8) {
+            chr = ted.vbuf[cell + i];
+            attr = ted.cbuf[cell + i];
+            b = bitmap[address & 0x1fff];
+            c1 = (chr >> 4) | ((attr & 7) << 4);
+            c0 = (chr & 15) | (attr & 0x70);
+            pixels = bg ^ (multi[1][b] & (bg ^ repeat_color(c1)))
+                        ^ (multi[2][b] & (bg ^ repeat_color(c0)))
+                        ^ (multi[3][b] & bg3);
+            memcpy(p + i * 8, &pixels, 8);
+        }
+    } else {
+        /* Modes with four colours and idle data share the same decoder as
+           a partial shifter run.  The common two-colour modes above only
+           hoist their invariant address and palette calculations. */
+        for (i = 1; i < count; i++) {
+            fetch_cell(cell + i);
+            beam.bits = beam.waiting_bits;
+            beam.attr = beam.waiting_attr;
+            beam.character = beam.waiting_char;
+            pixels = pixel_colors();
+            memcpy(p + i * 8, &pixels, 8);
+        }
+    }
+    fetch_cell(cell + count - 1);
+    beam.attr = beam.waiting_attr;
+    beam.character = beam.waiting_char;
+    if (beam.scroll) { fetch_cell(cell + count); }
+    beam.bits = 0;
+    beam.h += count * 8;
+    beam.x += count * 8;
+    beam.clk += count * 2;
+}
+
+/* Blank runs have no visible shifter output.  Stop before a graphics or
+   border event, and never skip a pending register latch. */
+static void emit_border(unsigned int n)
+{
+    int dest = (int)beam.x + ted.screen_leftborderwidth - 64;
+    unsigned int count = n;
+
+    if (dest < 0) {
+        unsigned int cut = (unsigned int)-dest;
+        if (cut > count) { cut = count; }
+        count -= cut;
+        dest += cut;
+    }
+    if (dest >= 0 && dest < (int)sizeof(beam.line) && count) {
+        if (count > sizeof(beam.line) - dest) { count = sizeof(beam.line) - dest; }
+        memset(beam.line + dest, beam.palette[4], count);
+    }
+    if ((beam.h & 7) == 0 || n > 8 - (beam.h & 7)) {
+        beam.control1 = ted.regs[6];
+        beam.control2 = ted.regs[7];
+        beam.scroll = beam.control2 & 7;
+        beam.waiting_bits = ted.idle_state ? (uint8_t)ted.idle_data : 0;
+        beam.waiting_attr = beam.waiting_char = 0;
+    }
+    if (multicolor()) {
+        unsigned int shift = (n + beam.pair) & ~1U;
+        beam.bits = shift >= 8 ? 0 : (uint8_t)(beam.bits << shift);
+    } else {
+        beam.bits = n >= 8 ? 0 : (uint8_t)(beam.bits << n);
+    }
+    beam.pair = (beam.pair + n) & 1;
+    beam.x += n;
+    if (beam.x > 576) { beam.x = 576; }
+    beam.h += n;
+    if (beam.h == 456 || beam.h == 512) { beam.h = 0; }
+    beam.sub += n;
+    beam.clk += beam.sub >> 2;
+    beam.sub &= 3;
+}
+
+/* Batch a complete, uninterrupted horizontal period.  The same shifter
+   decoder is used as for partial runs.  There are no writes, RAM mutations,
+   counter jumps or pending latches in this interval, so its fixed event
+   sequence can be reduced to one graphics span and two border spans. */
+static void emit_period(void)
+{
+    CLOCK start = beam.clk;
+    unsigned int left = ted.screen_leftborderwidth;
+    unsigned int end = left + 392;
+    unsigned int stop, gap;
+
+    beam.control1 = ted.regs[6];
+    beam.control2 = ted.regs[7];
+    beam.scroll = beam.control2 & 7;
+    if (end > sizeof(beam.line)) { end = sizeof(beam.line); }
+    if (!ted.raster.blank_enabled && !ted.raster.blank_this_line) {
+        memset(beam.line, beam.palette[4], left);
+        beam.border = 0;
+        beam.bits = 0;
+        {
+            uint64_t pixels = pixel_colors();
+            gap = *(uint8_t *)&pixels;
+        }
+        memset(beam.line + left, gap, beam.scroll);
+        beam.h = beam.scroll;
+        beam.x = 64 + beam.scroll;
+        beam.pair = 0;
+        fetch_cell(0);
+        beam.bits = beam.waiting_bits;
+        beam.attr = beam.waiting_attr;
+        beam.character = beam.waiting_char;
+        emit_cells(TED_SCREEN_TEXTCOLS);
+        if (!(ted.regs[7] & 8)) {
+            memset(beam.line + left, beam.palette[4], 8);
+        }
+        stop = left + ((ted.regs[7] & 8) ? 320 : 312);
+        memset(beam.line + stop, beam.palette[4], end - stop);
+    } else {
+        memset(beam.line, beam.palette[4], end);
+        fetch_cell(39);
+        beam.attr = beam.waiting_attr;
+        beam.character = beam.waiting_char;
+    }
+    beam.clk = start + 114;
+    beam.h = 392;
+    beam.x = 456;
+    beam.bits = 0;
+    beam.pair = beam.scroll & 1;
+    beam.border = 1;
+    beam.waiting_bits = ted.idle_state ? (uint8_t)ted.idle_data : 0;
+    beam.waiting_attr = beam.waiting_char = 0;
+}
+
+static void run_dots(uint64_t remaining)
+{
+    unsigned int n, load;
+
+    if (remaining == 456 && !beam.sub && beam.h == 392 && beam.x == 0
+        && !beam.delay && beam.border && !ted.raster.border_disable
+        && (!ted.idle_state || ted.raster.blank_enabled || ted.raster.blank_this_line)
+        && ted.screen_leftborderwidth >= 0 && ted.screen_leftborderwidth <= 64) {
+        emit_period();
+        return;
+    }
+    while (remaining) {
+        if (!beam.delay && beam.border && !ted.raster.border_disable
+            && beam.h >= 328 && beam.h < 440
+            && beam.control1 == ted.regs[6] && beam.control2 == ted.regs[7]) {
+            n = 440 - beam.h;
+            if (remaining < n) { n = (unsigned int)remaining; }
+            emit_border(n);
+            remaining -= n;
+            continue;
+        }
+        dot_events();
+        if (!beam.delay && remaining >= 8 && beam.h < ((ted.regs[7] & 8) ? 320U : 312U)
+            && (beam.h & 7) == beam.scroll && !beam.pair
+            && beam.control1 == ted.regs[6] && beam.control2 == ted.regs[7]) {
+            int dest = (int)beam.x + ted.screen_leftborderwidth - 64;
+            n = ((beam.h < 8 && !(ted.regs[7] & 8) ? 8 : (ted.regs[7] & 8) ? 320 : 312) - beam.h) / 8;
+            if (remaining / 8 < n) { n = (unsigned int)(remaining / 8); }
+            if (n && dest >= 0 && dest + n * 8 <= sizeof(beam.line)) {
+                emit_cells(n);
+                remaining -= n * 8;
+                continue;
+            }
+        }
+        n = 8 - (beam.h & 7);
+        load = (beam.scroll - beam.h) & 7;
+        if (load && load < n) {
+            n = load;
+        }
+        if (multicolor() && beam.pair && n == 8) {
+            n = 7;
+        }
+        if (remaining < n) {
+            n = (unsigned int)remaining;
+        }
+        if (beam.delay && beam.delay < n) {
+            n = beam.delay;
+        }
+        emit(n);
+        remaining -= n;
+        if (beam.delay) {
+            beam.delay -= n;
+            if (!beam.delay) {
+                if (beam.pending_color >= 0) {
+                    beam.palette[beam.pending_color] = beam.color_value;
+                    beam.pending_color = -1;
+                }
+                if (beam.pending_counter) {
+                    beam.h = ((~beam.counter_value & 0xfc) << 1) | (beam.h & 7);
+                    beam.pending_counter = 0;
+                }
+            }
+        }
+    }
+}
+
+void ted_draw_sync(CLOCK clk)
+{
+    if (ted.freeze || clk <= beam.clk) {
+        return;
+    }
+    run_dots((uint64_t)(clk - beam.clk) * 4 - beam.sub);
+}
+
+void ted_draw_store(unsigned int addr, uint8_t value)
+{
+    /* Timers, audio, keyboard and IRQ registers do not feed the pixel
+       pipeline.  They must not split otherwise uninterrupted video runs. */
+    if (addr < 6 || (addr >= 8 && addr <= 0x0b)
+        || (addr >= 0x0e && addr <= 0x11) || (addr >= 0x20 && addr < 0x3e)) {
+        return;
+    }
+    ted_draw_sync(maincpu_clk);
+    if (addr >= 0x15 && addr <= 0x19) {
+        if (beam.pending_color >= 0) {
+            beam.palette[beam.pending_color] = beam.color_value;
+        }
+        beam.pending_color = (int)addr - 0x15;
+        beam.palette[beam.pending_color] = 0x7f;
+        beam.color_value = value & 0x7f;
+        beam.delay = 1;
+    } else if (addr == 0x1e) {
+        beam.pending_counter = 1;
+        beam.counter_value = value;
+        beam.delay = 1;
+    } else if (!ted.freeze && beam.clk == maincpu_clk && beam.sub == 0) {
+        /* The horizontal comparisons at the bus edge see the old control
+           bits.  New mode/scroll bits enter the next single-clock latch. */
+        run_dots(1);
+    }
+}
+
+void ted_draw_begin_line(CLOCK clk)
+{
+    beam.clk = clk;
+    beam.sub = 0;
+    beam.h = 392;
+    beam.x = 0;
+}
+
+void ted_draw_reset(void)
+{
+    unsigned int i;
+
+    memset(&beam, 0, sizeof(beam));
+    beam.pending_color = -1;
+    beam.border = 1;
+    for (i = 0; i < 5; i++) {
+        beam.palette[i] = ted.regs[0x15 + i] & 0x7f;
+    }
+    ted_draw_begin_line(ted.last_emulate_line_clk);
 }
 
 void ted_draw_init(void)
 {
-    init_drawing_tables();
+    build_tables();
+    ted_draw_reset();
+}
 
-    setup_modes();
+void ted_draw_line(CLOCK clk, int visible)
+{
+    ted_draw_sync(clk);
+    if (visible) {
+        int end = (int)beam.x + ted.screen_leftborderwidth - 64;
+        unsigned int width = ted.raster.geometry->screen_size.width;
+        if (end < 0) { end = 0; }
+        if ((unsigned int)end < width) {
+            memset(beam.line + end, beam.palette[4], width - end);
+        }
+        raster_line_emulate_pixels(&ted.raster, beam.line);
+    }
+}
+
+void ted_draw_black_line(void)
+{
+    static const uint8_t black[512];
+    raster_line_emulate_pixels(&ted.raster, black);
+}
+
+void ted_draw_freeze(CLOCK delta)
+{
+    beam.clk += delta;
+}
+
+/* Snapshots store the unfinished line and every latch, never native structs. */
+int ted_draw_snapshot_write(snapshot_module_t *m)
+{
+    if (SMW_CLOCK(m, beam.clk) < 0
+        || SMW_DW(m, beam.sub) < 0
+        || SMW_DW(m, beam.h) < 0
+        || SMW_DW(m, beam.x) < 0
+        || SMW_B(m, beam.control1) < 0
+        || SMW_B(m, beam.control2) < 0
+        || SMW_B(m, beam.scroll) < 0
+        || SMW_B(m, beam.bits) < 0
+        || SMW_B(m, beam.attr) < 0
+        || SMW_B(m, beam.character) < 0
+        || SMW_B(m, beam.pair) < 0
+        || SMW_B(m, beam.waiting_bits) < 0
+        || SMW_B(m, beam.waiting_attr) < 0
+        || SMW_B(m, beam.waiting_char) < 0
+        || SMW_B(m, beam.color_value) < 0
+        || SMW_B(m, beam.counter_value) < 0
+        || SMW_BA(m, beam.palette, 5) < 0
+        || SMW_B(m, (uint8_t)beam.border) < 0
+        || SMW_B(m, (uint8_t)(beam.pending_color + 1)) < 0
+        || SMW_B(m, (uint8_t)beam.pending_counter) < 0
+        || SMW_B(m, (uint8_t)beam.delay) < 0
+        || SMW_BA(m, beam.line, sizeof(beam.line)) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+int ted_draw_snapshot_read(snapshot_module_t *m)
+{
+    ted_beam_t saved;
+    uint8_t border, color, counter, delay;
+    unsigned int i;
+
+    memset(&saved, 0, sizeof(saved));
+    if (SMR_CLOCK(m, &saved.clk) < 0
+        || SMR_DW(m, &saved.sub) < 0
+        || SMR_DW(m, &saved.h) < 0
+        || SMR_DW(m, &saved.x) < 0
+        || SMR_B(m, &saved.control1) < 0
+        || SMR_B(m, &saved.control2) < 0
+        || SMR_B(m, &saved.scroll) < 0
+        || SMR_B(m, &saved.bits) < 0
+        || SMR_B(m, &saved.attr) < 0
+        || SMR_B(m, &saved.character) < 0
+        || SMR_B(m, &saved.pair) < 0
+        || SMR_B(m, &saved.waiting_bits) < 0
+        || SMR_B(m, &saved.waiting_attr) < 0
+        || SMR_B(m, &saved.waiting_char) < 0
+        || SMR_B(m, &saved.color_value) < 0
+        || SMR_B(m, &saved.counter_value) < 0
+        || SMR_BA(m, saved.palette, 5) < 0
+        || SMR_B(m, &border) < 0
+        || SMR_B(m, &color) < 0
+        || SMR_B(m, &counter) < 0
+        || SMR_B(m, &delay) < 0
+        || SMR_BA(m, saved.line, sizeof(saved.line)) < 0) {
+        return -1;
+    }
+    if (saved.clk > maincpu_clk || saved.sub > 3 || saved.h > 511 || saved.x > 576
+        || saved.scroll > 7 || saved.pair > 1 || border > 1
+        || color > 5 || counter > 1 || delay > 1
+        || ((color || counter) && !delay) || saved.color_value > 127) {
+        snapshot_set_error(SNAPSHOT_MODULE_INCOMPATIBLE);
+        return -1;
+    }
+    for (i = 0; i < 5; i++) {
+        if (saved.palette[i] > 127) {
+            snapshot_set_error(SNAPSHOT_MODULE_INCOMPATIBLE);
+            return -1;
+        }
+    }
+    for (i = 0; i < sizeof(saved.line); i++) {
+        if (saved.line[i] > 127) {
+            snapshot_set_error(SNAPSHOT_MODULE_INCOMPATIBLE);
+            return -1;
+        }
+    }
+    saved.border = border;
+    saved.pending_color = (int)color - 1;
+    saved.pending_counter = counter;
+    saved.delay = delay;
+    beam = saved;
+    build_tables();
+    return 0;
+}
+
+void ted_draw_snapshot_legacy(void)
+{
+    unsigned int cycle = TED_RASTER_CYCLE(maincpu_clk);
+
+    ted_draw_reset();
+    beam.clk = maincpu_clk;
+    beam.h = cycle < 16 ? 392 + 4 * cycle : 4 * (cycle - 16);
+    beam.x = 4 * cycle;
+    beam.border = ted.raster.blank_enabled || cycle < 16 || cycle >= 96;
 }

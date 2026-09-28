@@ -761,3 +761,43 @@ underflow due at the freeze. The program freezes on line 220, loops about
 counters, timer 1 and the raster flag of line 222 before, during and after
 the freeze. The previous build moved to line 6 of the next frame during the
 loop. A snapshot saved inside the frozen loop resumes to the same results.
+
+## Pixel output pipeline
+
+```sh
+sh tests/plus4/run-pixel-test.sh /path/to/configured/build
+CFLAGS='-O2 -g -fsanitize=address,undefined' sh tests/plus4/run-pixel-test.sh /path/to/configured/build
+```
+
+TED now supplies palette-index pixels directly to the shared raster publisher.
+The previous TED cached/character renderer and its register-change queues have
+been removed. The new renderer keeps horizontal counter and physical output
+position separate. It emits runs up to the next pixel event, preserves fetched
+bytes across RAM stores, and saves unfinished output and latches in TED snapshot
+module 1.14. Uninterrupted runs use the same decoder with invariant work hoisted;
+complete periods have a batched state transition, checked against one-dot steps.
+
+The [FPGATED investigation](https://hackaday.io/project/11460-fpgated/details)
+is the basis for the one-dot horizontal-counter write delay and the one-dot
+white transient on colour writes. Tests cover all global colours, the border,
+multicolour half-pixels, horizontal overflow without moving emitted pixels,
+RAM latch preservation, interrupted snapshot continuation, and rejected
+truncated snapshots. Randomized tests compare output and every pipeline field
+between batched and one-dot execution, including all display modes and scrolls.
+These are software consistency tests, not independent measurements of silicon.
+
+The surrounding CPU-clock DMA and position-counter scheduling remains in place;
+this change does not establish dot-level fidelity of every fetch stage or model
+the analogue output's slew. The hires scroll gap retains the preceding cell's zero-bit colour.
+Performance is still being measured and tuned; no overall speedup is claimed.
+
+### PAL output on an NTSC machine
+
+Alpharay clears `$ff07` bit 6 on an NTSC-configured machine. The resulting
+312-line period exceeds the 262-line canvas, but is not an abnormally extended
+TED frame. The runaway-counter limit must allow the larger of the canvas and
+TED frame heights before adding its 40-line margin. Previously it forced a
+sync after 303 lines, then published a nine-line blank frame at TED's actual
+sync; this caused continuous flicker. `ted-mode-test.c` now additionally checks
+four PAL periods on an NTSC canvas, requiring exactly four syncs, all at TED's
+vertical-sync event. Existing mode assertions are unchanged.

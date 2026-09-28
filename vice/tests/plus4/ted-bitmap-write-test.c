@@ -19,41 +19,34 @@ static void setup(void)
     ted.counter_clk = maincpu_clk = 80;
 }
 
+static unsigned int flushes;
+void ted_draw_sync(CLOCK clk)
+{
+    assert(clk == maincpu_clk);
+    flushes++;
+}
+
 int main(void)
 {
     setup();
     ted_fetch_store(0x2002, 0xff, 0xffff);
-    assert(ted.bitmap_latched[0] && ted.bitmap_data[0] == 0xff);
-    ted_fetch_store(0x2002, 0, 0xffff);
-    assert(ted.bitmap_data[0] == 0xff); /* first fetched value survives */
-    ted_fetch_store(0x200a, 0x55, 0xffff);
-    assert(ted.bitmap_data[1] == 0x55);
-
-    setup();
-    ted.counter_clk = maincpu_clk = 4;
-    ted_fetch_store(0x2002, 0xff, 0xffff);
-    assert(!ted.bitmap_dirty); /* before bitmap fetching */
-    setup();
-    ted_fetch_store(0x2003, 0xff, 0xffff);
+    assert(flushes == 1);
     ted_fetch_store(0x4002, 0xff, 0xffff);
-    assert(!ted.bitmap_dirty); /* another row/bank */
+    assert(flushes == 1);
     ted.regs[0x12] |= 4;
     ted_fetch_store(0x2002, 0xff, 0xffff);
-    assert(!ted.bitmap_dirty); /* RAM write cannot change ROM fetch */
-
-    setup();
-    ted.regs[0x12] = 0x28; /* $a000 aliases $2000 with 16/32 KiB RAM */
-    ted_fetch_store(0x2002, 0x33, 0x3fff);
-    assert(ted.bitmap_latched[0] && ted.bitmap_data[0] == 0x33);
+    assert(flushes == 1);
     setup();
     ted.regs[0x12] = 0x28;
+    ted_fetch_store(0x2002, 0x33, 0x3fff);
     ted_fetch_store(0x2002, 0x66, 0x7fff);
-    assert(ted.bitmap_latched[0] && ted.bitmap_data[0] == 0x66);
-
+    assert(flushes == 3);
     setup();
-    ted.memptr = 1020;
-    ted_fetch_store(0x2002, 0xaa, 0xffff);
-    assert(ted.bitmap_latched[4] && ted.bitmap_data[4] == 0xaa);
-    puts("TED bitmap write preservation passed");
+    ted.regs[6] = 0x1b;
+    ted.regs[0x13] = 0x30;
+    ted_fetch_store(0x3002, 0x33, 0xffff);
+    ted_fetch_store(0x3802, 0x33, 0xffff);
+    assert(flushes == 4);
+    puts("TED video RAM writes flush the pixel pipeline (bitmap, charset, mirrors)");
     return 0;
 }

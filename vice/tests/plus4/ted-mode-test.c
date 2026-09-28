@@ -214,6 +214,33 @@ int main(void)
     }
     assert(ted.ted_raster_counter == 0 && vsyncs == 2);
 
+    /* Software can select PAL timing on an NTSC machine (Alpharay does).
+       The shorter canvas must not split each frame into 303 and 9 lines. */
+    setup(0);
+    ted.tv_current_line = 0;
+    ted.tv_height = TED_NTSC_SCREEN_HEIGHT;
+    ted_timing_set_mode(0);
+    vsyncs = 0;
+    for (line = 0; line < 4 * TED_PAL_SCREEN_HEIGHT; line++) {
+        maincpu_clk = ted.draw_clk;
+        ted_raster_draw_alarm_handler(0, NULL);
+        if (ted.ted_raster_counter == TED_PAL_VSYNC_LINE) {
+            assert(ted.tv_current_line == 0);
+        } else {
+            assert(ted.tv_current_line != 0);
+        }
+    }
+    assert(ted.ted_raster_counter == 0 && vsyncs == 4);
+
     puts("TED PAL/NTSC mode tests passed");
     return 0;
 }
+
+/* Pixel rendering is covered by ted-pixel-test.c. */
+void ted_draw_freeze(CLOCK delta) {}
+void ted_draw_begin_line(CLOCK clk) {}
+void ted_draw_line(CLOCK clk, int visible)
+{
+    if (visible) { raster_line_emulate(&ted.raster); }
+}
+void ted_draw_black_line(void) { raster_line_emulate(&ted.raster); }
