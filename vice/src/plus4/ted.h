@@ -42,7 +42,6 @@ struct snapshot_s;
 struct screenshot_s;
 
 extern CLOCK last_write_cycle;
-extern CLOCK first_write_cycle;
 
 int ted_resources_init(void);
 int ted_cmdline_options_init(void);

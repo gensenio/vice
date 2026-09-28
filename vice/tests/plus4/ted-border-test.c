@@ -14,15 +14,9 @@
 ted_t ted;
 CLOCK maincpu_clk;
 
-static raster_changes_t next_line;
-static raster_changes_all_t changes;
-
 static void setup(uint8_t ff06, uint8_t ff07, int blank_enabled)
 {
     memset(&ted.raster, 0, sizeof(ted.raster));
-    memset(&next_line, 0, sizeof(next_line));
-    changes.next_line = &next_line;
-    ted.raster.changes = &changes;
     ted.screen_leftborderwidth = 32;
     ted.screen_height = 312;
     ted.row_25_start_line = TED_PAL_25ROW_START_LINE;
@@ -31,26 +25,11 @@ static void setup(uint8_t ff06, uint8_t ff07, int blank_enabled)
     ted.row_24_stop_line = TED_PAL_24ROW_STOP_LINE;
     ted.regs[0x06] = ff06;
     ted.regs[0x07] = ff07;
-    if (ff07 & 8) {
-        ted.raster.display_xstart = TED_40COL_START_PIXEL;
-        ted.raster.display_xstop = TED_40COL_STOP_PIXEL;
-    } else {
-        ted.raster.display_xstart = TED_38COL_START_PIXEL;
-        ted.raster.display_xstop = TED_38COL_STOP_PIXEL;
-    }
     ted.regs[0x15] = 2;
     ted.regs[0x19] = 6;
     ted.raster.blank_enabled = blank_enabled;
     maincpu_clk = 0;
     ted_draw_init();
-}
-
-static void end_of_line(void)
-{
-    raster_changes_apply_all(&next_line);
-    ted.raster.open_left_border = ted.raster.open_right_border;
-    ted.raster.open_right_border = 0;
-    ted.raster.blank_this_line = 0;
 }
 
 static void change_width(int cycle, uint8_t value)
@@ -83,17 +62,13 @@ static void test_side_border(void)
 }
 
 /* The vertical latch changes immediately.  The separate side-border
-   latch consults it only at its opening comparisons. */
+   latch consults it only at its opening comparisons.  Returns 1 if the
+   vertical window is open after the write. */
 static int vertical(uint8_t old_ff06, uint8_t new_ff06, uint8_t ff07,
                     unsigned int line, int cycle, int blank_enabled)
 {
     setup(old_ff06, ff07, blank_enabled);
     check_lower_upper_border(new_ff06, line, cycle);
-    if (next_line.count) {
-        assert(ted.raster.blank_enabled == blank_enabled);
-        end_of_line();
-        return ted.raster.blank_enabled == blank_enabled ? -1 : 2;
-    }
     return !ted.raster.blank_enabled;
 }
 

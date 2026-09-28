@@ -14,16 +14,7 @@
 ted_t ted;
 CLOCK maincpu_clk;
 
-static raster_changes_t foreground;
-static raster_changes_t next_line;
-static raster_changes_all_t changes;
-static geometry_t geometry;
-
-void ted_update_memory_ptrs(unsigned int cycle)
-{
-}
-
-void ted_update_video_mode(unsigned int cycle)
+void ted_update_memory_ptrs(void)
 {
 }
 
@@ -37,14 +28,6 @@ void ted_badline_check_state(uint8_t value, const int cycle,
 static void setup(int enabled)
 {
     memset(&ted, 0, sizeof(ted));
-    memset(&foreground, 0, sizeof(foreground));
-    memset(&next_line, 0, sizeof(next_line));
-    memset(&changes, 0, sizeof(changes));
-    changes.foreground = &foreground;
-    changes.next_line = &next_line;
-    geometry.text_size.width = TED_SCREEN_TEXTCOLS;
-    ted.raster.changes = &changes;
-    ted.raster.geometry = &geometry;
     ted.screen_height = 312;
     ted.first_dma_line = TED_PAL_FIRST_DMA_LINE;
     ted.last_dma_line = TED_PAL_LAST_DMA_LINE;
@@ -61,7 +44,6 @@ static void setup(int enabled)
     ted.allow_bad_lines = enabled;
     ted.character_fetch_on = enabled;
     ted.raster.ycounter = enabled ? 7 : 0;
-    ted.draw_ycounter = ted.raster.ycounter;
 }
 
 int main(void)
@@ -75,7 +57,6 @@ int main(void)
         maincpu_clk = cycle;
         ted06_store(0x3b);
         assert(ted.raster.ycounter == 7);
-        assert(ted.draw_ycounter == 7);
         assert(ted.allow_bad_lines && ted.character_fetch_on);
 
         /* Enabled during line 0.  */
@@ -83,7 +64,6 @@ int main(void)
         maincpu_clk = cycle;
         ted06_store(0x1b);
         assert(ted.raster.ycounter == 7);
-        assert(ted.draw_ycounter == 7);
         assert(ted.allow_bad_lines && ted.character_fetch_on);
         assert(!ted.raster.blank);
     }

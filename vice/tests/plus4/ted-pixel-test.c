@@ -1,6 +1,7 @@
 /* Pixel pipeline contracts and independently stepped batching oracle. */
 #include "vice.h"
 #include <assert.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include "../../src/plus4/ted-draw.c"
@@ -297,6 +298,150 @@ static unsigned int next_random(void)
     return random_state >> 8;
 }
 
+/* A row of spaces takes the path for repeated cells.  The cursor must stay
+   in its cell also when the video matrix address wraps at 1024 inside the
+   row (character positions near $3ff, e.g. set through $ff1a/$ff1b). */
+static void cursor_wrap(void)
+{
+    static const unsigned int cases[][2] = {
+        { 0x000, 21 }, { 0x3f0, 21 }, { 0x3e8, 30 }, { 0x3fe, 1 }
+    };
+    ted_beam_t before, expected;
+    unsigned int i;
+
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        setup(TED_NORMAL_TEXT_MODE, 0);
+        memset(memory, 0, sizeof(memory));
+        memset(ted.vbuf, 0x20, sizeof(ted.vbuf));
+        memset(ted.cbuf, 0x71, sizeof(ted.cbuf));
+        ted.memptr = cases[i][0];
+        ted.crsrpos = (cases[i][0] + cases[i][1]) & 0x3ff;
+        before = beam;
+        reference_sync(114);
+        expected = beam;
+        beam = before;
+        ted_draw_sync(114);
+        assert(memcmp(&expected, &beam, sizeof(beam)) == 0);
+        /* The cursor cell is drawn in the character colour.  */
+        assert(beam.line[32 + cases[i][1] * 8] == 0x71);
+    }
+}
+
+/* Lines that the raster does not show are not drawn, but their latches
+   must advance as if they were: two runs over the same frames, one with
+   hidden lines, latch identical state and publish identical shown lines.
+   Between frames a few inputs of random lines change. */
+#define HIDDEN_FRAMES 60
+#define HIDDEN_LINES  48
+
+typedef struct {
+    uint8_t regs6, regs7, palette[5], vbuf[40], cbuf[40];
+    uint8_t ycounter, idle, idle_data, fetch_on, blank, cursor;
+    uint16_t memptr, crsrpos;
+} line_input_t;
+
+static line_input_t inputs[HIDDEN_LINES];
+static uint8_t drawn_out[HIDDEN_FRAMES][HIDDEN_LINES][384];
+static ted_beam_t drawn_state[HIDDEN_FRAMES][HIDDEN_LINES];
+
+static int hidden_line(unsigned int line)
+{
+    return line % 11 == 5;
+}
+
+static void mutate(line_input_t *in)
+{
+    switch (next_random() % 12) {
+        case 0: in->regs6 = 0x18 | ((next_random() & 3) << 5); break;
+        case 1: in->regs7 = (next_random() & 0x9f) | 0x08; break;
+        case 2: in->palette[next_random() % 5] = next_random() & 0x7f; break;
+        case 3: in->vbuf[next_random() % 40] = next_random(); break;
+        case 4: in->cbuf[next_random() % 40] = next_random(); break;
+        case 5: in->ycounter = next_random() & 7; break;
+        case 6: in->memptr = next_random() & 0x3ff; break;
+        case 7: in->crsrpos = (in->memptr + next_random() % 48) & 0x3ff; break;
+        case 8: in->cursor ^= 1; break;
+        case 9: in->idle = !(next_random() & 7); in->idle_data = next_random(); break;
+        case 10: in->blank = !(next_random() & 7); in->fetch_on = !!(next_random() & 15); break;
+        default: memory[next_random() % sizeof(memory)] = next_random(); break;
+    }
+}
+
+/* Without hidden lines (`hide' 0) store the published lines and the
+   latches; with them, compare.  */
+static void hidden_run(int hide)
+{
+    geometry_t geometry;
+    CLOCK clk = 0;
+    unsigned int frame, line, i;
+
+    setup(TED_NORMAL_TEXT_MODE, 0);
+    memset(&geometry, 0, sizeof(geometry));
+    geometry.screen_size.width = 384;
+    ted.raster.geometry = &geometry;
+    random_state = 99;
+    for (i = 0; i < sizeof(memory); i++) { memory[i] = next_random(); }
+    for (line = 0; line < HIDDEN_LINES; line++) {
+        line_input_t *in = &inputs[line];
+        in->regs6 = 0x18 | ((line % 4) << 5);
+        in->regs7 = 0x08 | (line & 0x97);
+        for (i = 0; i < 5; i++) { in->palette[i] = next_random() & 0x7f; }
+        for (i = 0; i < 40; i++) {
+            in->vbuf[i] = line & 1 ? 0x20 : next_random();
+            in->cbuf[i] = line & 2 ? 0x71 : next_random();
+        }
+        in->ycounter = line & 7;
+        in->memptr = (line >> 3) * 40 + (line == 40 ? 0x3e0 : 0);
+        in->crsrpos = (in->memptr + line % 41) & 0x3ff;
+        in->cursor = line & 1;
+        in->idle = line == 13;
+        in->idle_data = 0x5a;
+        in->fetch_on = line != 17;
+        in->blank = line >= 44;
+    }
+    for (frame = 0; frame < HIDDEN_FRAMES; frame++) {
+        for (line = 0; line < HIDDEN_LINES; line++) {
+            const line_input_t *in = &inputs[line];
+            int hidden = hide && hidden_line(line);
+
+            ted.regs[6] = in->regs6;
+            ted.regs[7] = in->regs7;
+            memcpy(beam.palette, in->palette, 5);
+            memcpy(ted.vbuf, in->vbuf, 40);
+            memcpy(ted.cbuf, in->cbuf, 40);
+            ted.raster.ycounter = in->ycounter;
+            ted.memptr = in->memptr;
+            ted.crsrpos = in->crsrpos;
+            ted.cursor_visible = in->cursor;
+            ted.idle_state = in->idle;
+            ted.idle_data = in->idle_data;
+            ted.character_fetch_on = in->fetch_on;
+            ted.raster.blank_enabled = in->blank;
+            ted_draw_begin_line(clk, !hidden);
+            clk += 114;
+            ted_draw_line(clk, 1);
+            if (!hide) {
+                memcpy(drawn_out[frame][line], published, 384);
+                drawn_state[frame][line] = beam;
+            } else {
+                assert(hidden || memcmp(drawn_out[frame][line], published, 384) == 0);
+                assert(memcmp(&drawn_state[frame][line], &beam,
+                              offsetof(ted_beam_t, line)) == 0);
+            }
+        }
+        for (i = 0; i < 4; i++) {
+            mutate(&inputs[next_random() % HIDDEN_LINES]);
+        }
+    }
+    ted.raster.geometry = NULL;
+}
+
+static void hidden_lines(void)
+{
+    hidden_run(0);
+    hidden_run(1);
+}
+
 static void period_equivalence(void)
 {
     ted_beam_t before, expected;
@@ -392,6 +537,8 @@ int main(void)
     snapshots();
     event_equivalence();
     period_equivalence();
-    puts("TED pixel pipeline: colour dots, RAM latch, counter delay, chunking and snapshots passed");
+    cursor_wrap();
+    hidden_lines();
+    puts("TED pixel pipeline: colour dots, RAM latch, counter delay, wide canvas, chunking, snapshots, cursor wrap and hidden lines passed");
     return 0;
 }

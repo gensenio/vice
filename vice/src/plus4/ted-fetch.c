@@ -34,7 +34,6 @@
 #include "dma.h"
 #include "maincpu.h"
 #include "ted-fetch.h"
-#include "ted-counter.h"
 #include "ted-draw.h"
 #include "tedtypes.h"
 #include "types.h"
@@ -70,7 +69,8 @@ void ted_fetch_matrix(int offs, int num)
     int start_char;
     int c;
 
-    /* Matrix fetches are done during Phi2, the fabulous "bad lines" */
+    /* When the attribute request of this line overlaps the character
+       request, both buffers receive attribute data.  */
     p = (ted.dma_line & 7) == (unsigned int)ted.raster.ysmooth
         ? ted.color_ptr : ted.screen_ptr;
 
@@ -83,11 +83,10 @@ void ted_fetch_matrix(int offs, int num)
         memcpy(ted.vbuf + offs, p + start_char, c);
         memcpy(ted.vbuf + offs + c, p, num - c);
     }
-    /*memcpy(ted.cbuf, ted.cbuf_tmp, TED_SCREEN_TEXTCOLS);*/
-
-/*    log_debug(LOG_DEFAULT, "Fetch line  : %03x, %03x", ted.ted_raster_counter, start_char);*/
 }
 
+/* Emulate an attribute fetch into `cbuf_tmp', which becomes `cbuf' at the
+   end of the line.  */
 inline void ted_fetch_color(int offs, int num)
 {
     int start_char;
@@ -102,77 +101,48 @@ inline void ted_fetch_color(int offs, int num)
         memcpy(ted.cbuf_tmp + offs, ted.color_ptr + start_char, c);
         memcpy(ted.cbuf_tmp + offs + c, ted.color_ptr, num - c);
     }
-/*    log_debug(LOG_DEFAULT, "Color fetch : %03x, %03x", ted.ted_raster_counter, start_char);*/
 }
 
-/* If we are on a bad line, do the DMA.  Return nonzero if cycles have been
-   stolen.  */
-inline static int do_matrix_fetch(CLOCK sub)
+/* Serve the DMA requests of the current line at its fetch cycle: character
+   data requested by the preceding line and attributes requested by this
+   one.  Either halts the CPU for the DMA window, minus `sub' clocks.  */
+inline static void do_matrix_fetch(CLOCK sub)
 {
-    int reval = 0;
+    int dma = 0;
 
     if (!ted.memory_fetch_done) {
-        raster_t *raster;
-
-        raster = &ted.raster;
-
         ted.memory_fetch_done = 1;
 
         if (ted.matrix_fetch_pending
             && ted.allow_bad_lines
             && ted.dma_line > ted.first_dma_line
-            /* && ted.bad_line */
             && ted.dma_line <= ted.last_dma_line) {
             ted_fetch_matrix(0, TED_SCREEN_TEXTCOLS);
-
-            raster->draw_idle_state = 0;
-            /* raster->ycounter = 0; */
-
             ted.idle_state = 0;
-            ted.idle_data_location = IDLE_NONE;
-            ted.ycounter_reset_checked = 1;
             ted.memory_fetch_done = 2;
-
-            ted.bad_line = 1;
-            reval = 1;
+            dma = 1;
         }
 
-        if ((ted.dma_line & 7) == (unsigned int)raster->ysmooth
+        if ((ted.dma_line & 7) == (unsigned int)ted.raster.ysmooth
             && ted.allow_bad_lines
             && ted.dma_line >= ted.first_dma_line
             && ted.dma_line < ted.last_dma_line) {
             ted.row_counter_active = 1;
             ted_fetch_color(0, TED_SCREEN_TEXTCOLS);
-/*
-            raster->draw_idle_state = 0;
-            raster->ycounter = 0;
-
-            ted.idle_state = 0;
-            ted.idle_data_location = IDLE_NONE;
-            ted.ycounter_reset_checked = 1;
-            ted.memory_fetch_done = 2;
-*/
-
-            ted.bad_line = 1;
-            reval = 1;
+            dma = 1;
         }
     }
 
-    if (reval) {
+    if (dma) {
         /* Both DMA requests share one bus-ownership interval. */
         dma_maincpu_steal_cycles(ted.fetch_clk,
                                  (TED_SCREEN_TEXTCOLS + 3) * 2 - sub, 0);
         ted_delay_oldclk((TED_SCREEN_TEXTCOLS + 3) * 2 - sub);
     }
-
-    return reval;
 }
 
-inline static void handle_fetch_matrix(long offset, CLOCK sub,
-                                       CLOCK *write_offset)
+inline static void handle_fetch_matrix(CLOCK sub)
 {
-    *write_offset = 0;
-
     do_matrix_fetch(sub);
 
     if ((ted.ted_raster_counter >= ted.first_dma_line) &&
@@ -183,17 +153,14 @@ inline static void handle_fetch_matrix(long offset, CLOCK sub,
     }
 
     alarm_set(ted.raster_fetch_alarm, ted.fetch_clk);
-
-    return;
 }
 
-/* Handle matrix fetch events.  FIXME: could be made slightly faster.  */
+/* Handle matrix fetch events.  */
 void ted_fetch_alarm_handler(CLOCK offset, void *data)
 {
     CLOCK last_opcode_first_write_clk;
     CLOCK last_opcode_last_write_clk;
     CLOCK sub;
-    CLOCK write_offset;
 
     if (ted_freeze_defers(&ted.fetch_clk)) {
         alarm_unset(ted.raster_fetch_alarm);
@@ -246,8 +213,7 @@ void ted_fetch_alarm_handler(CLOCK offset, void *data)
         sub = last_opcode_last_write_clk - ted.fetch_clk + 1;
     }
 
-    handle_fetch_matrix(offset, sub, &write_offset);
-    last_opcode_last_write_clk += write_offset;
+    handle_fetch_matrix(sub);
 
     if ((offset > 11) && (ted.fastmode)) {
         dma_maincpu_steal_cycles(ted.fetch_clk, -(((signed)offset - 11) / 2), 0);

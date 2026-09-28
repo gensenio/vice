@@ -33,7 +33,6 @@
 #include <string.h>
 
 #include "alarm.h"
-#include "interrupt.h"
 #include "joyport.h"
 #include "keyboard.h"
 #include "log.h"
@@ -41,14 +40,12 @@
 #include "mem.h"
 #include "plus4mem.h"
 #include "plus4pio2.h"
-#include "raster-changes.h"
 #include "ted-badline.h"
 #include "ted-counter.h"
 #include "ted-draw.h"
 #include "ted-fetch.h"
 #include "ted-irq.h"
 #include "ted-mem.h"
-#include "ted-resources.h"
 #include "ted-sound.h"
 #include "ted-timer.h"
 #include "ted.h"
@@ -136,36 +133,6 @@ void ted_mem_vbank_store_16k(uint16_t addr, uint8_t value)
     ted_local_store_vbank_16k(addr, value);
 }
 
-#if 0
-/* As `store_vbank()', but for the $3900...$39FF address range.  */
-void ted_mem_vbank_39xx_store(uint16_t addr, uint8_t value)
-{
-    ted_local_store_vbank(addr, value);
-
-    if (ted.idle_data_location == IDLE_39FF && (addr & 0x3fff) == 0x39ff) {
-        raster_changes_foreground_add_int
-            (&ted.raster,
-            TED_RASTER_CHAR(TED_RASTER_CYCLE(maincpu_clk)),
-            &ted.idle_data,
-            value);
-    }
-}
-
-/* As `store_vbank()', but for the $3F00...$3FFF address range.  */
-void ted_mem_vbank_3fxx_store(uint16_t addr, uint8_t value)
-{
-    ted_local_store_vbank (addr, value);
-
-    if (ted.idle_data_location == IDLE_3FFF && (addr & 0x3fff) == 0x3fff) {
-        raster_changes_foreground_add_int
-            (&ted.raster,
-            TED_RASTER_CHAR(TED_RASTER_CYCLE(maincpu_clk)),
-            &ted.idle_data,
-            value);
-    }
-}
-#endif
-
 inline static void check_lower_upper_border(const uint8_t value,
                                             unsigned int line, int cycle)
 {
@@ -206,8 +173,6 @@ inline static void ted06_store(const uint8_t value)
     unsigned int line;
     int old_value;
 
-/*    log_debug(LOG_DEFAULT, "FF06 %03x, %02x",ted.ted_raster_counter, value);*/
-
     cycle = TED_RASTER_CYCLE(maincpu_clk);
     line = TED_RASTER_Y(maincpu_clk);
 
@@ -228,7 +193,6 @@ inline static void ted06_store(const uint8_t value)
         ted.allow_bad_lines = 1;
         ted.character_fetch_on = 1;
         ted.raster.ycounter = 7;
-        ted.draw_ycounter = 7;
     }
 
     if ((ted.raster.ysmooth != (value & 7))
@@ -247,36 +211,28 @@ inline static void ted06_store(const uint8_t value)
     old_value = ted.regs[0x06];
     ted.regs[0x06] = value;
 
+    /* ECM, like $ff07 bit 7, aligns the character set to 2 KB.  */
     if ((old_value & 0x40) != (value & 0x40)) {
-        ted_update_memory_ptrs(cycle);
+        ted_update_memory_ptrs();
     }
-
-    /* FIXME: save time.  */
-    ted_update_video_mode(cycle);
 }
 
+/* The side border, mode, scroll and reverse bits are latched by the pixel
+   pipeline (see ted-draw.c), which has drawn the dots up to this write.  */
 inline static void ted07_store(uint8_t value)
 {
-    raster_t *raster;
-    int cycle;
     int old_value;
 
     TED_DEBUG_REGISTER(("Control register: $%02X", value));
-
-    raster = &ted.raster;
-    cycle = TED_RASTER_CYCLE(maincpu_clk);
-
-    raster->xsmooth = value & 7;
-    ted.reverse_mode = value & 0x80;
-    /* Horizontal border comparisons and mode/scroll latches belong to the
-       pixel pipeline; changing the register does not redraw past dots. */
 
     old_value = ted.regs[0x07];
 
     ted.regs[0x07] = value;
 
-    if ((old_value & 0x90) != (value & 0x90)) {
-        ted_update_memory_ptrs(cycle);
+    /* Bit 7 (256 characters instead of reverse ones), like ECM, aligns
+       the character set to 2 KB.  */
+    if ((old_value ^ value) & 0x80) {
+        ted_update_memory_ptrs();
     }
 
     /* Bit 6 selects NTSC mode.  */
@@ -288,8 +244,6 @@ inline static void ted07_store(uint8_t value)
     if ((old_value ^ value) & 0x20) {
         ted_set_freeze((value & 0x20) != 0);
     }
-
-    ted_update_video_mode(cycle);
 }
 
 inline static void ted08_store(const uint8_t value)
@@ -412,14 +366,7 @@ inline static void ted0c0d_store(const uint16_t addr, const uint8_t value)
         pos = (ted.crsrpos & 0xff) | ((value & 3) << 8);
     }
 
-#if 0
-    raster_changes_background_add_int(&ted.raster,
-                                      TED_RASTER_CHAR(TED_RASTER_CYCLE(maincpu_clk)),
-                                      &ted.crsrpos,
-                                      pos);
-#else
     ted.crsrpos = pos;
-#endif
     ted.regs[addr] = value;
 }
 
@@ -432,7 +379,7 @@ inline static void ted12_store(uint8_t value)
     }
 
     ted.regs[0x12] = value;
-    ted_update_memory_ptrs(TED_RASTER_CYCLE(maincpu_clk));
+    ted_update_memory_ptrs();
 }
 
 inline static void ted13_store(const uint8_t value)
@@ -444,15 +391,13 @@ inline static void ted13_store(const uint8_t value)
     if ((ted.regs[0x13] & 2) ^ (value & 2)) {
         if (value & 2) {
             ted.fastmode = 0;
-/*            log_debug(LOG_DEFAULT, "Slow mode");*/
         } else {
             ted.fastmode = 1;
-/*            log_debug(LOG_DEFAULT, "Fast mode");*/
         }
     }
 
     ted.regs[0x13] = (ted.regs[0x13] & 0x01) | (value & 0xfe);
-    ted_update_memory_ptrs(TED_RASTER_CYCLE(maincpu_clk));
+    ted_update_memory_ptrs();
 }
 
 inline static void ted14_store(const uint8_t value)
@@ -462,26 +407,14 @@ inline static void ted14_store(const uint8_t value)
     }
 
     ted.regs[0x14] = value;
-    ted_update_memory_ptrs(TED_RASTER_CYCLE(maincpu_clk));
+    ted_update_memory_ptrs();
 }
 
-inline static void ted15_store(uint8_t value)
-{
-    ted.regs[0x15] = value & 0x7f;
-    ted.raster.background_color = value & 0x7f;
-    ted.raster.idle_background_color = value & 0x7f;
-}
-
-inline static void ted161718_store(uint16_t addr, uint8_t value)
+/* The colour registers $ff15-$ff19 feed the pixel pipeline, which latches
+   them with the one dot transient of a colour write (see ted-draw.c).  */
+inline static void ted_color_store(uint16_t addr, uint8_t value)
 {
     ted.regs[addr] = value & 0x7f;
-    ted.ext_background_color[addr - 0x16] = value & 0x7f;
-}
-
-inline static void ted19_store(uint8_t value)
-{
-    ted.regs[0x19] = value & 0x7f;
-    ted.raster.border_color = value & 0x7f;
 }
 
 inline static void ted1a1b_store(uint16_t addr, uint8_t value)
@@ -511,7 +444,6 @@ inline static void ted1c1d_store(uint16_t addr, uint8_t value)
         new_raster = (ted.ted_raster_counter & 0x100) + value;
     }
 
-/*    log_debug(LOG_DEFAULT, "Raster change old %03x, new %03x",ted.ted_raster_counter, new_raster);*/
     /* The current DMA request uses the latched scanline, not this writable
        counter.  In particular, a write before the fetch must not skip it. */
     if (ted.fetch_clk != ted.last_emulate_line_clk + TED_FETCH_CYCLE
@@ -594,7 +526,6 @@ inline static void ted1f_store(uint8_t value)
     ted.cursor_phase = current_cursor_phase | new_cursor_count;
     ted.cursor_visible = ted.cursor_phase & 0x10;
     ted.cursor_phase = (ted.cursor_phase - pending) & 0x1f;
-    ted.draw_ycounter = value & 7;
     ted.raster.ycounter = value & 7;
 }
 
@@ -602,14 +533,14 @@ inline static void ted3e_store(void)
 {
     ted.regs[0x13] |= 0x01;
     mem_config_ram_set(1);
-    ted_update_memory_ptrs(TED_RASTER_CYCLE(maincpu_clk));
+    ted_update_memory_ptrs();
 }
 
 inline static void ted3f_store(void)
 {
     ted.regs[0x13] &= 0xfe;
     mem_config_ram_set(0);
-    ted_update_memory_ptrs(TED_RASTER_CYCLE(maincpu_clk));
+    ted_update_memory_ptrs();
 }
 
 /* Store a value in a TED register.  */
@@ -617,16 +548,9 @@ void ted_store(uint16_t addr, uint8_t value)
 {
     addr &= 0x3f;
 
-    /* WARNING: assumes `maincpu_rmw_flag' is 0 or 1.  */
+    /* Serve the TED events up to this write, ending the previous lines.
+       WARNING: assumes `maincpu_rmw_flag' is 0 or 1.  */
     ted_handle_pending_alarms(maincpu_rmw_flag + 1);
-
-    /* This is necessary as we must be sure that the previous line has been
-       updated and `current_line' is actually set to the current Y position of
-       the raster.  Otherwise we might mix the changes for this line with the
-       changes for the previous one.  */
-    if (maincpu_clk >= ted.draw_clk) {
-        ted_raster_draw_alarm_handler(maincpu_clk - ted.draw_clk, NULL);
-    }
 
     ted_draw_store(addr, value);
 
@@ -678,15 +602,11 @@ void ted_store(uint16_t addr, uint8_t value)
             ted14_store(value);
             break;
         case 0x15:
-            ted15_store(value);
-            break;
         case 0x16:
         case 0x17:
         case 0x18:
-            ted161718_store(addr, value);
-            break;
         case 0x19:
-            ted19_store(value);
+            ted_color_store(addr, value);
             break;
         case 0x1a:
         case 0x1b:
@@ -710,25 +630,6 @@ void ted_store(uint16_t addr, uint8_t value)
             break;
     }
 }
-
-/* FIXME: unused? */
-#if 0
-inline static unsigned int read_raster_y(void)
-{
-    int raster_y;
-
-    raster_y = TED_RASTER_Y(maincpu_clk);
-
-    /* Line 0 is 62 cycles long, while line (SCREEN_HEIGHT - 1) is 64
-       cycles long.  As a result, the counter is incremented one
-       cycle later on line 0.  */
-    if (raster_y == 0 && TED_RASTER_CYCLE(maincpu_clk) == 0) {
-        raster_y = ted.screen_height - 1;
-    }
-
-    return raster_y;
-}
-#endif
 
 inline static uint8_t ted08_read(void)
 {
@@ -864,7 +765,7 @@ uint8_t ted_read(uint16_t addr)
 
 inline static uint8_t ted09_peek(void)
 {
-    /* Manually set raster IRQ flag if the opcode reading $19 has crossed
+    /* Manually set raster IRQ flag if the opcode reading $09 has crossed
        the line end and the raster IRQ alarm has not been executed yet. */
     if (TED_RASTER_Y(maincpu_clk) == ted.raster_irq_line
         && ted.raster_irq_clk != CLOCK_MAX
@@ -874,11 +775,8 @@ inline static uint8_t ted09_peek(void)
         } else {
             return ted.irq_status | 0x23;
         }
-    } else {
-        return ted.irq_status | 0x21;
     }
-
-    return ted.irq_status;
+    return ted.irq_status | 0x21;
 }
 
 uint8_t ted_peek(uint16_t addr)

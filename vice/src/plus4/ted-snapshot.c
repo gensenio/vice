@@ -27,18 +27,16 @@
 
 #include "vice.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "alarm.h"
 #include "interrupt.h"
 #include "log.h"
-#include "mem.h"
 #include "plus4.h"
 #include "snapshot.h"
 #include "raster-snapshot.h"
-#include "raster-sprite-status.h"
-#include "raster-sprite.h"
 #include "ted-irq.h"
 #include "ted-draw.h"
 #include "ted-snapshot.h"
@@ -73,38 +71,43 @@ void ted_snapshot_prepare(void)
 }
 
 /*
+    TED snapshot module format.  Each version appends to the previous one;
+    loading an older module keeps or derives the missing state.
 
-    FIXME: this snapshot module is severely broken:
-    - video stuff is incomplete/buggy
-    - timers are saved since version 1.12 only
-
-    NOTE: if you run into problems when testing, try running with a clean config and sound disabled
-
-    FIXME: the following also doesn't match the code
-
-    TED snapshot module format:
-
-    Type    | Name                       |  Description
-    ---------------------------------------------------
-    DWORD   | last_emulate_line_clk      |
-    BYTE    | AllowBadLines              |  flag: if true, bad lines can happen
-    BYTE    | BadLine                    |  flag: this is a bad line
-    BYTE    | Blank                      |  flag: draw lines in border color
-    40*BYTE | ColorBuf                   |  character memory buffer (loaded at bad line)
-    BYTE    | IdleState                  |  flag: idle state enabled
-    40*BYTE | MatrixBuf                  |  video matrix buffer (loaded at bad line)
-    DWORD   | RamBase                    |  pointer to the start of RAM seen by the TED
-    BYTE    | RasterCycle                |  current ted.raster cycle
-    WORD    | RasterLine                 |  current ted.raster line
-    64*BYTE | Registers                  |  TED registers
-    DWORD   | ted_raster_counter         |
-    WORD    | Vc                         |  internal TED counter
-    BYTE    | mem_counter_inc            |  (VcInc) value to add to Vc at the end of this line
-    WORD    | VcBase                     |  internal TED memory pointer
-    BYTE    | VideoInt                   |  status of TED IRQ (ted.irq_status)
-            |
-    [Alarm section]
-    DWORD   | FetchEventTick             |  ticks for the next "fetch" (DMA) event
+    Type    | Name                  | Description
+    ---------------------------------------------------------------------
+    QWORD   | last_emulate_line_clk | clock at which the current line started
+    BYTE    | AllowBadLines         | flag: DMA can happen in this frame
+    BYTE    | BadLine               | unused, 0
+    BYTE    | Blank                 | flag: vertical window closed
+    40*BYTE | ColorBuf              | attribute buffer
+    BYTE    | IdleState             | flag: idle state
+    40*BYTE | MatrixBuf             | character buffer
+    BYTE    | RasterCycle           | cycle within the line
+    WORD    | RasterLine            | current raster line
+    64*BYTE | Registers             | TED registers
+    DWORD   | tv_current_line       | line of the TV frame
+    DWORD   | screen_height         | lines of the TED frame
+    DWORD   | first_displayed_line  |
+    DWORD   | last_displayed_line   |
+    DWORD   | ted_raster_counter    |
+    WORD    | Vc                    | DMA counter
+    BYTE    | VcInc                 | unused, 40
+    WORD    | VcBase                | character position
+    BYTE    | VideoInt              | interrupt status
+    QWORD   | FetchEventTick        | clocks to the next DMA fetch event
+            | raster                | common raster module data
+    1.6:    | chr_pos_reload, chr_pos_count
+    1.7:    | counter_clk, counter_overflow_until, counter_increment,
+            | row_counter_active, memptr_col
+    1.8:    | sound registers and oscillators (ted-sound.c)
+    1.9:    | 80 bytes, unused, 0
+    1.10:   | BYTE unused (row counter), BYTE row counter,
+            | BYTE matrix_fetch_pending
+    1.11:   | dma_line, chr_pos_latch
+    1.12:   | timers (ted-timer.c), line_repeat, fetch and refresh clock holds
+    1.13:   | sound voice and output state (ted-sound.c)
+    1.14:   | pixel pipeline (ted-draw.c)
 */
 
 static char snap_module_name[] = "TED";
@@ -127,14 +130,16 @@ int ted_snapshot_write_module(snapshot_t *s)
         return -1;
     }
 
-    DBG(("TED write snapshot at clock: %d cycle: %d tedline: %d rasterline: %d", maincpu_clk, TED_RASTER_CYCLE(maincpu_clk), TED_RASTER_Y(maincpu_clk), ted.raster.current_line));
+    DBG(("TED write snapshot at clock: %"PRIu64" cycle: %u tedline: %u rasterline: %u",
+         maincpu_clk, TED_RASTER_CYCLE(maincpu_clk), TED_RASTER_Y(maincpu_clk),
+         ted.raster.current_line));
 
     if (0
         || SMW_CLOCK(m, ted.last_emulate_line_clk) < 0
         /* AllowBadLines */
         || SMW_B(m, (uint8_t)ted.allow_bad_lines) < 0
         /* BadLine */
-        || SMW_B(m, (uint8_t)ted.bad_line) < 0
+        || SMW_B(m, 0) < 0
         /* Blank */
         || SMW_B(m, (uint8_t)ted.raster.blank_enabled) < 0
         /* ColorBuf */
@@ -167,7 +172,7 @@ int ted_snapshot_write_module(snapshot_t *s)
         /* Vc */
         || SMW_W(m, (uint16_t)ted.mem_counter) < 0
         /* VcInc */
-        || SMW_B(m, (uint8_t)ted.mem_counter_inc) < 0
+        || SMW_B(m, TED_SCREEN_TEXTCOLS) < 0
         /* VcBase */
         || SMW_W(m, (uint16_t)ted.memptr) < 0
         /* VideoInt */
@@ -207,12 +212,15 @@ int ted_snapshot_write_module(snapshot_t *s)
         goto fail;
     }
 
-    if (SMW_BA(m, ted.bitmap_latched, TED_SCREEN_TEXTCOLS) < 0
-        || SMW_BA(m, ted.bitmap_data, TED_SCREEN_TEXTCOLS) < 0) {
-        goto fail;
+    {
+        static const uint8_t unused[2 * TED_SCREEN_TEXTCOLS];
+
+        if (SMW_BA(m, unused, sizeof(unused)) < 0) {
+            goto fail;
+        }
     }
 
-    if (SMW_B(m, (uint8_t)ted.draw_ycounter) < 0
+    if (SMW_B(m, (uint8_t)ted.raster.ycounter) < 0
         || SMW_B(m, (uint8_t)ted.raster.ycounter) < 0
         || SMW_B(m, (uint8_t)ted.matrix_fetch_pending) < 0) {
         goto fail;
@@ -263,6 +271,7 @@ int ted_snapshot_read_module(snapshot_t *s)
     int i;
     uint16_t RasterLine;
     uint8_t RasterCycle;
+    uint8_t unused;
     snapshot_module_t *m;
 
     m = snapshot_module_open(s, snap_module_name,
@@ -279,8 +288,6 @@ int ted_snapshot_read_module(snapshot_t *s)
         goto fail;
     }
 
-    /* FIXME: initialize changes?  */
-
     /* A freeze of the running machine ends; $FF07 bit 5 of the snapshot
        freezes again once everything is restored.  */
     ted.freeze = 0;
@@ -292,7 +299,7 @@ int ted_snapshot_read_module(snapshot_t *s)
         /* AllowBadLines */
         || SMR_B_INT(m, &ted.allow_bad_lines) < 0
         /* BadLine */
-        || SMR_B_INT(m, &ted.bad_line) < 0
+        || SMR_B(m, &unused) < 0
         /* Blank */
         || SMR_B_INT(m, &ted.raster.blank_enabled) < 0
         /* ColorBuf */
@@ -322,7 +329,7 @@ int ted_snapshot_read_module(snapshot_t *s)
         /* Vc */
         || SMR_W_INT(m, &ted.mem_counter) < 0
         /* VcInc */
-        || SMR_B_INT(m, &ted.mem_counter_inc) < 0
+        || SMR_B(m, &unused) < 0
         /* VcBase */
         || SMR_W_INT(m, &ted.memptr) < 0
         /* VideoInt */
@@ -353,61 +360,17 @@ int ted_snapshot_read_module(snapshot_t *s)
         goto fail;
     }
 
-    /* FIXME: Recalculate alarms and derived values.  */
-
+    /* Recalculate the alarms and the state derived from the registers.  */
     ted_irq_set_raster_line(ted.regs[0x0b] | ((ted.regs[0x0a] & 1) << 8));
 
-    ted_update_memory_ptrs(TED_RASTER_CYCLE(maincpu_clk));
+    ted_update_memory_ptrs();
 
-    ted.raster.xsmooth = ted.regs[0x07] & 0x7;
-    ted.reverse_mode = ted.regs[0x07] & 0x80;
     ted.raster.ysmooth = ted.regs[0x06] & 0x7;
-    ted.raster.current_line = TED_RASTER_Y(maincpu_clk); /* FIXME? */
-
-    /* Update colors.  */
-    ted.raster.border_color = ted.regs[0x19];
-    ted.raster.background_color = ted.regs[0x15];
-    ted.ext_background_color[0] = ted.regs[0x16];
-    ted.ext_background_color[1] = ted.regs[0x17];
-    ted.ext_background_color[2] = ted.regs[0x18];
-
     ted.raster.blank = !(ted.regs[0x06] & 0x10);
 
-    if (TED_IS_ILLEGAL_MODE (ted.raster.video_mode)) {
-        ted.raster.idle_background_color = 0;
-        ted.force_black_overscan_background_color = 1;
-    } else {
-        ted.raster.idle_background_color = ted.raster.background_color;
-        ted.force_black_overscan_background_color = 0;
-    }
-
-    if (ted.regs[0x06] & 0x8) {
-        ted.raster.display_ystart = ted.row_25_start_line;
-        ted.raster.display_ystop = ted.row_25_stop_line;
-    } else {
-        ted.raster.display_ystart = ted.row_24_start_line;
-        ted.raster.display_ystop = ted.row_24_stop_line;
-    }
-
-    if (ted.regs[0x07] & 0x8) {
-        ted.raster.display_xstart = TED_40COL_START_PIXEL;
-        ted.raster.display_xstop = TED_40COL_STOP_PIXEL;
-    } else {
-        ted.raster.display_xstart = TED_38COL_START_PIXEL;
-        ted.raster.display_xstop = TED_38COL_STOP_PIXEL;
-    }
-
-    /* `ted.raster.draw_idle_state', `ted.raster.open_right_border' and
-       `ted.raster.open_left_border' should be needed, but they would only
-       affect the current ted.raster line, and would not cause any
-       difference in timing.  So who cares.  */
-
-    /* FIXME: `ted.ycounter_reset_checked'?  */
-    /* FIXME: `ted.force_display_state'?  */
-
-    ted.memory_fetch_done = 0; /* FIXME? */
-
-    ted_update_video_mode(TED_RASTER_CYCLE(maincpu_clk));
+    /* FIXME: not saved; after loading, the current line behaves as if its
+       fetch cycle had not passed yet.  */
+    ted.memory_fetch_done = 0;
 
     ted.draw_clk = maincpu_clk + (ted.draw_cycle - TED_RASTER_CYCLE(maincpu_clk));
     ted.last_emulate_line_clk = ted.draw_clk - ted.cycles_per_line;
@@ -469,28 +432,29 @@ int ted_snapshot_read_module(snapshot_t *s)
     } else {
         ted_sound_snapshot_legacy(ted.regs + 0x0e);
     }
-    ted.bitmap_dirty = 0;
-    memset(ted.bitmap_latched, 0, sizeof(ted.bitmap_latched));
     if (snapshot_version_is_bigger(major_version, minor_version, 1, 8)) {
-        if (SMR_BA(m, ted.bitmap_latched, TED_SCREEN_TEXTCOLS) < 0
-            || SMR_BA(m, ted.bitmap_data, TED_SCREEN_TEXTCOLS) < 0) {
+        /* Versions 1.9-1.13 of the removed line renderer: CPU-overwritten
+           bitmap flags (0 or 1) and bytes.  */
+        uint8_t latched[TED_SCREEN_TEXTCOLS], data[TED_SCREEN_TEXTCOLS];
+
+        if (SMR_BA(m, latched, TED_SCREEN_TEXTCOLS) < 0
+            || SMR_BA(m, data, TED_SCREEN_TEXTCOLS) < 0) {
             goto fail;
         }
         for (i = 0; i < TED_SCREEN_TEXTCOLS; i++) {
-            if (ted.bitmap_latched[i] > 1) {
+            if (latched[i] > 1) {
                 goto fail;
             }
-            ted.bitmap_dirty |= ted.bitmap_latched[i];
         }
     }
-    ted.draw_ycounter = ted.raster.ycounter;
     ted.matrix_fetch_pending = ted.allow_bad_lines
         && ((ted.ted_raster_counter - 1) & 7) == (unsigned int)ted.raster.ysmooth;
     if (snapshot_version_is_bigger(major_version, minor_version, 1, 9)) {
-        if (SMR_B_INT(m, &ted.draw_ycounter) < 0
+        /* The first byte is the row counter of the removed line renderer. */
+        if (SMR_B(m, &unused) < 0
             || SMR_B_UINT(m, &ted.raster.ycounter) < 0
             || SMR_B_INT(m, &ted.matrix_fetch_pending) < 0
-            || ted.draw_ycounter > 7 || ted.raster.ycounter > 7
+            || unused > 7 || ted.raster.ycounter > 7
             || ted.matrix_fetch_pending > 1) {
             goto fail;
         }

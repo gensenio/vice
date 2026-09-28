@@ -947,12 +947,6 @@ static void ted_sound_machine_store(sound_t *psid, uint16_t addr, uint8_t val)
     if (snd.sample_rate) {
         ted_sound_level_changed();
     }
-#if 0
-    DBG(("freq0:%04x freq1:%04x ctrl:%02x\n",
-            plus4_sound_data[0] | (plus4_sound_data[4] << 8),
-            plus4_sound_data[1] | (plus4_sound_data[2] << 8),
-            plus4_sound_data[3]));
-#endif
 }
 
 static uint8_t ted_sound_machine_read(sound_t *psid, uint16_t addr)

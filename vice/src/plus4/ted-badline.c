@@ -37,23 +37,12 @@
 #include "types.h"
 
 
+/* A bad line that becomes good after cycle 0 was one already: TED stays in
+   display state, which a register change cannot end.  */
 inline static void line_becomes_good(int cycle)
 {
-    /* Bad line becomes good.  */
-    ted.bad_line = 0;
-
-    /* By changing the values in the registers, one can make the TED
-       switch from idle to display state, but not from display to
-       idle state.  So we are always in display state if this
-       happens.  This is only true if the value changes in some
-       cycle > 0, though; otherwise, the line never becomes bad.  */
     if (cycle > 0) {
-        ted.raster.draw_idle_state = ted.idle_state = 0;
-        ted.idle_data_location = IDLE_NONE;
-        if ((cycle > (TED_FETCH_CYCLE + 2)) && !ted.ycounter_reset_checked) {
-            /*ted.raster.ycounter = 0;*/
-            ted.ycounter_reset_checked = 1;
-        }
+        ted.idle_state = 0;
     }
 }
 
@@ -73,7 +62,6 @@ inline static void line_becomes_bad(int cycle, unsigned int line)
         return;
     }
 
-    ted.bad_line = 1;
     ted.row_counter_active = 1;
 
     /* The following line fetches the character data (see the raster draw

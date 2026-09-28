@@ -28,6 +28,15 @@ void dma_maincpu_steal_cycles(CLOCK start, CLOCK num, CLOCK sub)
     stolen += num;
 }
 
+/* Serve the fetch cycle of the line; return the clocks stolen from the
+   CPU, 86 for a DMA.  */
+static CLOCK fetch(void)
+{
+    stolen = 0;
+    do_matrix_fetch(0);
+    return stolen;
+}
+
 void ted_delay_oldclk(CLOCK num)
 {
 }
@@ -79,14 +88,13 @@ int main(void)
     ted.allow_bad_lines = 1;
     ted.raster.ysmooth = 3;
     ted.matrix_fetch_pending = 1;
-    assert(do_matrix_fetch(0));
-    assert(stolen == 86);
+    assert(fetch() == 86);
     assert(memcmp(ted.vbuf, matrix, 40) == 0);
 
     /* A live match must not change a character DMA to attribute addresses. */
     ted1c1d_store(0x1d, 3);
     ted.memory_fetch_done = 0;
-    assert(do_matrix_fetch(0));
+    assert(fetch() == 86);
     assert(memcmp(ted.vbuf, matrix, 40) == 0);
 
     /* Repeated latched attribute lines fill both buffers, even when the
@@ -94,7 +102,7 @@ int main(void)
     ted.dma_line = 3;
     ted1c1d_store(0x1d, 2);
     ted.memory_fetch_done = 0;
-    assert(do_matrix_fetch(0));
+    assert(fetch() == 86);
     assert(memcmp(ted.vbuf, colors, 40) == 0);
     assert(memcmp(ted.cbuf_tmp, colors, 40) == 0);
 
@@ -103,7 +111,7 @@ int main(void)
     assert(ted1c1d_read(0x1c) == 0xff);
     assert(ted.dma_line == 3);
     ted.memory_fetch_done = 0;
-    assert(do_matrix_fetch(0));
+    assert(fetch() == 86);
 
     /* After this line's event, the new counter schedules future fetches. */
     maincpu_clk = 20;

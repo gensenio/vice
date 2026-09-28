@@ -50,9 +50,10 @@ HNY2013 writes raster counters and border colors while generating nonstandard
 video timing. Before the fix, TED skipped lines beyond the canvas without
 applying their queued changes. Border changes accumulated past
 `RASTER_CHANGES_MAX` and corrupted the adjacent change list, causing a crash in
-`raster_changes_apply_all` when drawing resumed. The fix drains all five change
-lists on skipped lines, without drawing outside the canvas. It does not change
-the common raster renderer used by other machines.
+`raster_changes_apply_all` when drawing resumed. The fix drained all five change
+lists on skipped lines, without drawing outside the canvas. Since the pixel
+output pipeline (see below) TED queues no raster changes; the test still guards
+frames extended beyond the canvas.
 
 Obtain the PRG from the [author's release page](https://plus4world.powweb.com/software/HNY2013)
 and pass it to the integration test (the third-party binary is not included):
@@ -417,8 +418,8 @@ sh tests/plus4/run-dma-follow-test.sh /path/to/configured/build
 The row test requires ACME and Pillow. It checks hires and multicolour output:
 a late `$ff1f` write must not change a cell already displayed, while an earlier
 write must affect its row selection. This is a causality regression, not a
-measurement of the exact pixel-fetch phase. The implementation uses VICE's
-existing character-granularity foreground change queue.
+measurement of the exact pixel-fetch phase. The pixel output pipeline draws the
+dots up to the write before the new row is used.
 
 The DMA test compiles the production fetch code. It checks that the second
 DMA request survives a vertical-scroll change, that a new scroll match cannot
@@ -430,14 +431,14 @@ The second-request latch, shared DMA FSM and address selection are based on
 FPGATED 1.3 (`badline2`, `dma_state`, `tedaddress`, attribute/character buffers),
 not a new original-hardware measurement. Exact intra-line changes to the DMA
 request remain outside the aggregated fetch model. Snapshot version 1.10 adds
-the CPU/render row values and second-request latch; existing snapshot limits
-on pending raster changes are not resolved by this change.
+the CPU/render row values and second-request latch; the render row value is
+unused since the pixel output pipeline.
 
-Queued row changes also exercise the uncached raster background path. The
+Queued row changes used to exercise the uncached raster background path. The
 Pets Rescue border regression covers an open right border with zero space
 remaining after horizontal scroll: a negative fill length must not be passed
-to `memset`. The shared raster renderer now applies its existing positive-length
-guard in both border-capability cases.
+to `memset`. The shared raster renderer applies its positive-length guard in
+both border-capability cases; TED no longer uses that renderer.
 
 ### Display enable and CPU clocks
 
@@ -492,9 +493,10 @@ are not new measurements of original hardware.
 The unit test includes the production `ted-mem.c` handlers and checks every
 cycle of a line. The integration test measures display spans in screenshots
 after writes in the middle of lines 100, 199 and 203 (vertical scroll 0
-keeps them free of DMA); the previous build fails all three cases. In the open border
-VICE still draws the idle background colour; TED's idle graphics there are
-not modelled.
+keeps them free of DMA); the previous build fails all three cases. In the open
+side border the pixel output pipeline shows its shift register, which holds no
+cell data there apart from the idle data loaded two cells before the display;
+this is not a verified model of TED's fetches in the border.
 
 ## Blink counter line
 
@@ -530,13 +532,12 @@ python3 tests/plus4/run-hscroll-test.py /path/to/xplus4
 A `$ff07` scroll write after the second character was deferred to the next
 line. Both YapeSDL (`writeHorizShift`, aligned to the next single clock) and
 plus4emu (`setHorizontalScroll` as a delayed event used by the per-cycle
-renderers) apply it within the line. The change is now queued on VICE's
-character-granular foreground list from the character after the one being
-output (character i is output during cycles 16 + 2i and 17 + 2i), so later
+renderers) apply it within the line. The pixel output pipeline latches the new
+scroll one dot after the write, at the next character, and reloads its shift
+register at the dot where the horizontal counter matches the scroll, so later
 characters move: a larger scroll leaves background colour in the gap, as
 YapeSDL's `drawEmptyArea` does, and a smaller one overlaps the previous
-character. The pixel within a character at which TED reloads its shift
-register is not modelled, so the split is exact only to a character.
+character.
 
 The test alternates reverse spaces and spaces and writes a scroll of four in
 the middle of line 100 (vertical scroll 0 keeps it free of DMA). Line 99 must
@@ -549,13 +550,18 @@ scrolled on the right. The previous build scrolled only from line 101.
 sh tests/plus4/run-reverse-test.sh /path/to/configured/build
 ```
 
+The unit test now checks the `$ff07` register handler: a change of bit 7
+updates the video memory pointers, and bits 6 and 5 switch the video standard
+and the freeze only when they change. The pixel output pipeline latches bit 7
+with the other `$ff07` bits at each character.
+
 `$ff07` bit 7 selects whether bit 7 of the character code reverses the
 character or addresses 256 characters. VICE changed the character set
 address it implies from the next character (`ted_update_memory_ptrs()`), but
 set the reverse flag itself immediately, so the whole line was drawn with it
 at cycle 114. YapeSDL applies it at each character fetch (`rvsmode` in the
 address mask) and plus4emu one cycle after the write (`updateVideoMode`). It
-is now queued on the character-granular foreground list with the same
+was then queued on the character-granular foreground list with the same
 position as the address change: from the next character within the window,
 from the next line after it.
 
@@ -564,8 +570,7 @@ Return to Promised Land's opening switches between a RAM character set with
 line, after the window. The line of each switch was drawn with the new
 reverse flag and the old character set: a line of reversed spaces in the
 text colour above the shrinking BASIC screen and a blank line of its white
-background below it. The test writes both directions at every cycle. The
-snapshot loader now also restores the flag from `$ff07`.
+background below it.
 
 ## Display enable on line 0
 
@@ -662,8 +667,8 @@ The test fills the bitmap with 0 pixels in cells with attribute `$70` and
 video `$01` (white 0 pixels, dark grey for `$01`), starts line 100 with a
 scroll of 4 and sets 0 in the middle of the line. The four gap pixels of
 lines 99 and 100 must have the display colour; the previous build drew dark
-grey on line 100. Lines drawn from the cache still fill the gap with `$ff15`,
-as before.
+grey on line 100. The pixel output pipeline uses the 0 pixel colour of the
+last character in every line.
 
 ## PAL and NTSC mode ($ff07 bit 6)
 
@@ -799,6 +804,25 @@ mode the left margin was -4, passed to `raster_set_geometry()` as unsigned,
 and xplus4 crashed in the first canvas refresh (upstream VICE has the same
 values). The margins now use `TED_DRAW_DISPLAY_START`, and `ted-mode-test.c`
 checks every border mode in both standards. The canvas itself is unchanged.
+
+The path for runs of identical cells compared the cursor position without the
+10-bit wrap of the video matrix address, unlike the per-cell fetch: after a
+wrap inside the row (character positions near `$3ff`, set through
+`$ff1a`/`$ff1b`) the cursor cell was drawn without the cursor. `ted-pixel-test.c`
+compares that path with one-dot execution around the wrap.
+
+TED opens and closes the vertical window itself and sets the display lines of
+the common raster to -1, so that the raster never toggles the window. The
+snapshot loader set them to TED's row lines, which the raster compares with
+canvas lines: after a load, the upper border opened at canvas line 4 and the
+display closed at canvas line 203 (PAL TED lines 261 and 148). The loader no
+longer sets them. A saved bitmap demo showed both artefacts after loading and is
+complete again; this is an integration observation, not a unit test.
+
+TV lines outside the displayed part of the canvas are not drawn: TED tells the
+pipeline whether the raster shows each line, and a whole hidden line only
+advances the latches. `ted-pixel-test.c` compares frames with and without hidden
+lines: the latches after every line and every shown line must be identical.
 
 The surrounding CPU-clock DMA and position-counter scheduling remains in place;
 this change does not establish dot-level fidelity of every fetch stage or model

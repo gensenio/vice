@@ -38,41 +38,14 @@
 #define TED_SCREEN_TEXTCOLS             40
 #define TED_SCREEN_TEXTLINES            25
 
-/*
-#define TED_40COL_START_PIXEL           0x20
-#define TED_40COL_STOP_PIXEL            0x160
-#define TED_38COL_START_PIXEL           0x28
-#define TED_38COL_STOP_PIXEL            0x158
-*/
-
-#define TED_40COL_START_PIXEL ted.screen_leftborderwidth
-#define TED_40COL_STOP_PIXEL  (ted.screen_leftborderwidth + TED_SCREEN_XPIX)
-/* The 38 column window starts and stops one double clock (eight pixels)
-   inside the 40 column window on both sides.  */
-#define TED_38COL_START_PIXEL (ted.screen_leftborderwidth + 8)
-#define TED_38COL_STOP_PIXEL  (ted.screen_leftborderwidth + 312)
-
-/* FIXME don't need */
-#define TED_PAL_OFFSET                  48
-#define TED_NTSC_OFFSET                 0 /* FIXME */
-
-/* values in TED raster counter */
-/* 0x004 in TED raster counter */
+/* First and last lines of the 25 and 24 row display windows, in values of
+   the TED raster counter.  */
 #define TED_PAL_25ROW_START_LINE        4
-/* 0x0CB in TED raster counter */
 #define TED_PAL_25ROW_STOP_LINE         0xcb
-/* 0x008 in TED raster counter */
 #define TED_PAL_24ROW_START_LINE        8
-/* 0x0C7 in TED raster counter */
 #define TED_PAL_24ROW_STOP_LINE         0xc7
 
-/* FIXME calculate NTSC values */
-/*
-#define TED_NTSC_25ROW_START_LINE       (0x33 - TED_NTSC_OFFSET)
-#define TED_NTSC_25ROW_STOP_LINE        (0xfb - TED_NTSC_OFFSET)
-#define TED_NTSC_24ROW_START_LINE       (0x37 - TED_NTSC_OFFSET)
-#define TED_NTSC_24ROW_STOP_LINE        (0xf7 - TED_NTSC_OFFSET)
-*/
+/* NTSC mode uses the PAL values; not verified on hardware.  */
 #define TED_NTSC_25ROW_START_LINE       4
 #define TED_NTSC_25ROW_STOP_LINE        0xcb
 #define TED_NTSC_24ROW_START_LINE       8
@@ -86,7 +59,8 @@
 #define TED_NUM_COLORS                  128
 
 
-/* Available video modes.  The number is given by TED registers.  */
+/* Video modes, numbered by ECM, BMM ($ff06 bits 6 and 5) and MCM ($ff07
+   bit 4).  */
 enum ted_video_mode_s {
     TED_NORMAL_TEXT_MODE,
     TED_MULTICOLOR_TEXT_MODE,
@@ -96,13 +70,10 @@ enum ted_video_mode_s {
     TED_ILLEGAL_TEXT_MODE,
     TED_ILLEGAL_BITMAP_MODE_1,
     TED_ILLEGAL_BITMAP_MODE_2,
-    TED_IDLE_MODE,           /* Special mode for idle state.  */
     TED_NUM_VMODES
 };
-typedef enum ted_video_mode_s ted_video_mode_t;
 
-#define TED_IS_ILLEGAL_MODE(x)       ((x) >= TED_ILLEGAL_TEXT_MODE && (x) != TED_IDLE_MODE)
-#define TED_IS_BITMAP_MODE(x)        ((x) & 0x02)
+#define TED_IS_ILLEGAL_MODE(x)       ((x) >= TED_ILLEGAL_TEXT_MODE)
 
 /* Note: we measure cycles from 0 to 113, not from 1 to 114.  */
 
@@ -118,15 +89,6 @@ typedef enum ted_video_mode_s ted_video_mode_t;
 /* Attribute and character bytes are fetched for character i at cycle
    TED_DMA_SLOT_CYCLE + 2 * i.  */
 #define TED_DMA_SLOT_CYCLE          12
-
-/* Cycles at which the side border flip-flop tests CSEL ($ff07 bit 3).  Each
-   test only fires for its own width: the display starts at cycle 16 in 40
-   column mode or 18 in 38 column mode, and stops at cycle 94 in 38 column
-   mode or 96 in 40 column mode.  A CPU write is seen by later cycles.  */
-#define TED_40COL_START_CYCLE       16
-#define TED_38COL_START_CYCLE       18
-#define TED_38COL_STOP_CYCLE        94
-#define TED_40COL_STOP_CYCLE        96
 
 /* Cycle at which the DMA and bitmap positions are latched for the next
    character row (see ted-counter.c).  */
@@ -149,13 +111,9 @@ typedef enum ted_video_mode_s ted_video_mode_t;
    `ted_delay_irq_clk()'.  */
 #define TED_RASTER_IRQ_CYCLE        0
 
-/* Current char being drawn by the raster.  < 0 or >= TED_SCREEN_TEXTCOLS
-   if outside the visible range.  */
-#define TED_RASTER_CHAR(cycle)      (((int)(cycle) - 15) / 2 )
-
-/* Current vertical position of the raster.  Unlike `rasterline', which is
-   only accurate if a pending drawing event has been served, this is
-   guaranteed to be always correct. */
+/* Current vertical position of the raster.  Unlike `ted.ted_raster_counter',
+   which advances when the draw event of the line is served, this is correct
+   at any clock.  */
 #define TED_RASTER_Y(clk)           ((unsigned int)((ted.ted_raster_counter \
                                                      + (((clk) - ted.last_emulate_line_clk) \
                                                         >= 114 ? (ted.ted_raster_counter == (ted.screen_height - 1) \
@@ -169,57 +127,28 @@ typedef enum ted_video_mode_s ted_video_mode_t;
 #define TED_COUNTER_CLK             (ted.freeze ? ted.freeze_clk : maincpu_clk)
 
 /* `clk' value for the beginning of the current line.  */
-/* FIXME: assigned to (CLOCK)ted.raster_irq_clk in ted-irq.c:ted_irq_set_raster_line() */
-/* FIXME: assigned to (CLOCK)ted.raster_irq_clk in ted-mem.c:ted1c1d_store() */
 #define TED_LINE_START_CLK(clk)     ((CLOCK)(ted.last_emulate_line_clk + (((clk) - ted.last_emulate_line_clk) >= 114UL ? 114UL : 0UL)))
 
-/* # of the previous and next raster line.  Handles wrap over.  */
-/* FIXME not always true, previous line can be 511 */
+/* # of the previous raster line.  Handles wrap over.
+   FIXME: after a counter write beyond the last line it can be 511.  */
 #define TED_PREVIOUS_LINE(line)  (((line) > 0) ? (line) - 1 : ted.screen_height - 1)
-/* FIXME not always true, line counter can be in range [screen_height, 511] */
-#define TED_NEXT_LINE(line)      (((line) + 1) % ted.screen_height)
 
-/* FIXME not used can be dropped */
-#define TED_LINE_RTOU(line) ((line + ted.screen_height - ted.offset) % ted.screen_height)
-#define TED_LINE_UTOR(line) ((line + ted.screen_height + ted.offset) % ted.screen_height)
-
-/* Bad line range.  */
-/* TED raster_counter values */
+/* DMA line range, in values of the TED raster counter.  */
 #define TED_PAL_FIRST_DMA_LINE      0x0
 #define TED_PAL_LAST_DMA_LINE       0xcb
 
-/* FIXME: verify ntsc values */
-/*
-#define TED_NTSC_FIRST_DMA_LINE     (0x30 - TED_NTSC_OFFSET)
-#define TED_NTSC_LAST_DMA_LINE      0xf7
-*/
-#define TED_NTSC_FIRST_DMA_LINE     0x0   /* FIXME */
-#define TED_NTSC_LAST_DMA_LINE      0xcb  /* FIXME */
+/* NTSC mode uses the PAL values; not verified on hardware.  */
+#define TED_NTSC_FIRST_DMA_LINE     0x0
+#define TED_NTSC_LAST_DMA_LINE      0xcb
 
 /* TED structures.  This is meant to be used by TED modules
    *exclusively*!  */
-
-/*
-enum ted_fetch_idx_s {
-    TED_FETCH_MATRIX,
-    TED_FETCH_COLOR,
-};
-typedef enum ted_fetch_idx_s ted_fetch_idx_t;
-*/
-
-/* FIXME Idle location is always $ffff in TED or the data is coming from CPU cycles in certain cases */
-enum ted_idle_data_location_s {
-    IDLE_NONE,
-    IDLE_3FFF,
-    IDLE_39FF
-};
-typedef enum ted_idle_data_location_s ted_idle_data_location_t;
 
 struct alarm_s;
 
 struct ted_s {
     /* Flag: Are we initialized?  */
-    int initialized;            /* = 0; */
+    int initialized;
 
     /* TED raster.  */
     raster_t raster;
@@ -235,7 +164,7 @@ struct ted_s {
     unsigned int timer_running[3];
 
     /* Interrupt register.  */
-    int irq_status;             /* = 0; */
+    int irq_status;
 
     /* Line for raster compare IRQ.  */
     unsigned int raster_irq_line;
@@ -254,18 +183,8 @@ struct ted_s {
     /* If this flag is set, bad lines (DMA's) can happen.  */
     int allow_bad_lines;
 
-    /* Extended background colors (1, 2 and 3).  */
-    int ext_background_color[3];
-
-    /* Flag: is reverse mode enabled or not (bit 7 of $ff07) */
-    int reverse_mode;
-
     /* Flag: are we in idle state? */
     int idle_state;
-
-    /* Flag: should we force display (i.e. non-idle) state for the following
-       line? */
-    int force_display_state;
 
     /* Which display line is drawn? */
     unsigned int tv_current_line;
@@ -273,8 +192,8 @@ struct ted_s {
     /* Scanline latched for DMA; $ff1c/$ff1d only change the live counter. */
     unsigned int dma_line;
 
-    /* This flag is set if a memory fetch has already happened on the current
-       line.  FIXME: Value of 2?...  */
+    /* Non-zero once the fetch cycle of the current line has passed; 2 if
+       it also fetched character data, halting the CPU.  */
     int memory_fetch_done;
 
     /* Horizontal-event state.  Clocks use the CPU double-clock unit. */
@@ -295,11 +214,6 @@ struct ted_s {
     /* Enabled by the first attribute fetch, independently of bitmap fetch. */
     int row_counter_active;
 
-    /* Bitmap bytes fetched before a CPU write, until this line is drawn. */
-    uint8_t bitmap_latched[TED_SCREEN_TEXTCOLS];
-    uint8_t bitmap_data[TED_SCREEN_TEXTCOLS];
-    int bitmap_dirty;
-
     /* Internal memory pointer (VCBASE).  */
     int memptr;
     int memptr_col;
@@ -314,13 +228,6 @@ struct ted_s {
     /* The row counter was 6 when the current line began: the bitmap
        position is latched at TED_POSITION_LATCH_CYCLE.  */
     int chr_pos_latch;
-    int chr_pos_inc_enable;
-
-    /* Value to add to `mem_counter' after the graphics has been painted.  */
-    int mem_counter_inc;
-
-    /* Flag: is the current line a `bad' line? */
-    int bad_line;
 
     /* Is the cursor visible?  */
     int cursor_visible;
@@ -331,29 +238,13 @@ struct ted_s {
     /* Cursor position.  */
     int crsrpos;
 
-    /* Flag: Check for raster.ycounter reset already done on this line?
-       (cycle 13) */
-    int ycounter_reset_checked;
-
-    /* Row sub-address for deferred foreground rendering. */
-    int draw_ycounter;
-
     /* Character DMA follows the attribute request on the preceding line. */
     int matrix_fetch_pending;
 
-    /* Flag: Does the currently selected video mode force the overscan
-       background color to be black?  (This happens with the hires bitmap and
-       illegal modes.)  */
-    int force_black_overscan_background_color;
-
-    /* Data to display in idle state.  */
+    /* Data to display in idle state: the byte at $ffff.  */
     int idle_data;
 
-    /* Where do we currently fetch idle stata from?  If `IDLE_NONE', we are
-       not in idle state and thus do not need to update `idle_data'.  */
-    ted_idle_data_location_t idle_data_location;
-
-    /* TED keybaord read value.  */
+    /* TED keyboard read value.  */
     uint8_t kbdval;
 
     /* All the TED logging goes here.  */
@@ -373,10 +264,7 @@ struct ted_s {
     CLOCK freeze_clk;
     CLOCK tv_line_clk;
     struct alarm_s *tv_line_alarm;
-#if 0
-    /* What do we do when the `A_RASTERFETCH' event happens?  */
-    ted_fetch_idx_t fetch_idx;
-#endif
+
     /* Clock cycle for the next "raster fetch" alarm.  */
     CLOCK fetch_clk;
 
@@ -391,7 +279,7 @@ struct ted_s {
     /* Clock value for raster compare IRQ.  */
     CLOCK raster_irq_clk;
 
-    /* FIXME: Bad name.  FIXME: Has to be initialized.  */
+    /* Clock at which the current line started.  */
     CLOCK last_emulate_line_clk;
 
     /* Geometry and timing parameters of the selected TED emulation.  */
@@ -422,9 +310,6 @@ struct ted_s {
     unsigned int tv_height;
     unsigned int tv_vsync_line;
 
-    /* Number of lines the whole screen is shifted up.  */
-    int offset;
-
     /* TED clock mode.  */
     unsigned int fastmode;
 
@@ -447,10 +332,8 @@ typedef struct ted_s ted_t;
 extern ted_t ted;
 
 /* Private function calls, used by the other TED modules.  */
-void ted_update_memory_ptrs(unsigned int cycle);
-void ted_update_video_mode(unsigned int cycle);
+void ted_update_memory_ptrs(void);
 void ted_raster_draw_alarm_handler(CLOCK offset, void *data);
-/* void ted_resize(void); */
 void ted_delay_clk(void);
 void ted_delay_oldclk(CLOCK num);
 void ted_delay_resync(void);
@@ -462,15 +345,8 @@ CLOCK ted_delay_irq_clk(CLOCK clk);
 
 /* Debugging options.  */
 
-/* #define TED_VMODE_DEBUG */
 /* #define TED_RASTER_DEBUG */
 /* #define TED_REGISTERS_DEBUG */
-
-#ifdef TED_VMODE_DEBUG
-#define TED_DEBUG_VMODE(x) log_printf x
-#else
-#define TED_DEBUG_VMODE(x)
-#endif
 
 #ifdef TED_RASTER_DEBUG
 #define TED_DEBUG_RASTER(x) log_printf x

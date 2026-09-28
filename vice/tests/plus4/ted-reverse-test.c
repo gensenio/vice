@@ -1,5 +1,8 @@
-/* Register storage and PAL/NTSC/freeze hooks.  The pixel latch timing of
-   reverse and mode changes is exercised by ted-pixel-test.c. */
+/* The $ff07 register handler.  Bit 7 (reverse or 256 characters), like
+   ECM, aligns the character set to 2 KB: a change of it updates the video
+   memory pointers.  Bit 6 selects PAL or NTSC mode and bit 5 freezes TED.
+   Only a change of each bit has an effect.  The pixel pipeline latches the
+   bits (see ted-pixel-test.c). */
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -9,17 +12,11 @@
 ted_t ted;
 CLOCK maincpu_clk;
 
-static raster_changes_t foreground;
-static raster_changes_t next_line;
-static raster_changes_all_t changes;
-static geometry_t geometry;
+static int memory_ptr_updates;
 
-void ted_update_memory_ptrs(unsigned int cycle)
+void ted_update_memory_ptrs(void)
 {
-}
-
-void ted_update_video_mode(unsigned int cycle)
-{
+    memory_ptr_updates++;
 }
 
 static int ntsc_mode_calls;
@@ -42,21 +39,9 @@ void ted_set_freeze(int value)
 
 static void setup(uint8_t ff07)
 {
-    memset(&ted.raster, 0, sizeof(ted.raster));
-    memset(&foreground, 0, sizeof(foreground));
-    memset(&next_line, 0, sizeof(next_line));
-    memset(&changes, 0, sizeof(changes));
-    changes.foreground = &foreground;
-    changes.next_line = &next_line;
-    geometry.text_size.width = TED_SCREEN_TEXTCOLS;
-    ted.raster.changes = &changes;
-    ted.raster.geometry = &geometry;
-    ted.screen_leftborderwidth = 32;
     ted.regs[0x06] = 0x1b;
     ted.regs[0x07] = ff07;
-    ted.reverse_mode = ff07 & 0x80;
-    ted.raster.display_xstart = TED_40COL_START_PIXEL;
-    ted.raster.display_xstop = TED_40COL_STOP_PIXEL;
+    memory_ptr_updates = 0;
 }
 
 int main(void)
@@ -69,21 +54,20 @@ int main(void)
         uint8_t to = on ? 0x08 : 0x88;
 
         for (cycle = 0; cycle < 114; cycle++) {
-
             setup(from);
             maincpu_clk = cycle;
             ted07_store(to);
-            assert(ted.reverse_mode == (to & 0x80));
-            assert(foreground.count == 0 && next_line.count == 0);
+            assert(ted.regs[0x07] == to);
+            assert(memory_ptr_updates == 1);
         }
     }
 
-    /* Writes that keep bit 7 queue no change of it. */
+    /* Scroll, width and multicolour bits do not move the pointers. */
     setup(0x88);
     maincpu_clk = 100;
-    ted07_store(0x98);
-    assert(foreground.count == 0 && next_line.count == 0);
-    assert(ntsc_mode_calls == 0);
+    ted07_store(0x9f);
+    assert(memory_ptr_updates == 0);
+    assert(ntsc_mode_calls == 0 && freeze_calls == 0);
 
     /* Bit 6 selects NTSC mode; only a change of it switches the mode. */
     setup(0x08);
@@ -104,6 +88,6 @@ int main(void)
     ted07_store(0x18);
     assert(freeze_calls == 2 && !freeze);
 
-    puts("TED reverse mode tests passed");
+    puts("TED $ff07 register tests passed");
     return 0;
 }

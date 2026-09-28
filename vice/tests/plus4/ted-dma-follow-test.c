@@ -9,6 +9,15 @@ void dma_maincpu_steal_cycles(CLOCK start, CLOCK num, CLOCK sub)
 {
     stolen += num;
 }
+
+/* Serve the fetch cycle of the line; return the clocks stolen from the
+   CPU, 86 for a DMA.  */
+static CLOCK fetch(void)
+{
+    stolen = 0;
+    do_matrix_fetch(0);
+    return stolen;
+}
 void ted_delay_oldclk(CLOCK num)
 {
 }
@@ -33,22 +42,18 @@ int main(void)
     ted.memptr_col = 1020;
     ted.raster.ysmooth = 0; /* no longer matches the preceding line */
     ted.matrix_fetch_pending = 1;
-    assert(do_matrix_fetch(0));
-    assert(stolen == 86);
+    assert(fetch() == 86);
     for (i = 0; i < 40; i++) {
         assert(ted.vbuf[i] == (uint8_t)(1020 + i));
     }
     ted.memory_fetch_done = 0;
     ted.matrix_fetch_pending = 0;
     ted.raster.ysmooth = 5; /* a match now cannot invent the earlier request */
-    stolen = 0;
-    assert(!do_matrix_fetch(0));
-    assert(stolen == 0);
+    assert(fetch() == 0);
     ted.memory_fetch_done = 0;
     ted.matrix_fetch_pending = 1;
     ted.raster.ysmooth = 6; /* simultaneous requests use the attribute address */
-    assert(do_matrix_fetch(0));
-    assert(stolen == 86);
+    assert(fetch() == 86);
     for (i = 0; i < 40; i++) {
         assert(ted.vbuf[i] == (uint8_t)~(1020 + i));
         assert(ted.cbuf_tmp[i] == ted.vbuf[i]);

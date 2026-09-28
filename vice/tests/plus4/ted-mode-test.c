@@ -19,8 +19,6 @@ static interrupt_cpu_status_t int_status;
 interrupt_cpu_status_t *maincpu_int_status = &int_status;
 static alarm_context_t context;
 static alarm_t draw_alarm, fetch_alarm, irq_alarm;
-static raster_changes_t background, foreground, border, sprites, next_line;
-static raster_changes_all_t changes;
 static geometry_t geometry;
 static int machine_mode_calls;
 static int machine_mode;
@@ -127,19 +125,6 @@ static void setup(unsigned int counter)
     ted.raster_draw_alarm = &draw_alarm;
     ted.raster_fetch_alarm = &fetch_alarm;
     ted.raster_irq_alarm = &irq_alarm;
-    memset(&changes, 0, sizeof(changes));
-    memset(&background, 0, sizeof(background));
-    memset(&foreground, 0, sizeof(foreground));
-    memset(&border, 0, sizeof(border));
-    memset(&sprites, 0, sizeof(sprites));
-    memset(&next_line, 0, sizeof(next_line));
-    changes.background = &background;
-    changes.foreground = &foreground;
-    changes.border = &border;
-    changes.sprites = &sprites;
-    changes.next_line = &next_line;
-    geometry.text_size.width = TED_SCREEN_TEXTCOLS;
-    ted.raster.changes = &changes;
     ted.raster.geometry = &geometry;
     ted.cycles_per_line = 114;
     ted.first_dma_line = TED_PAL_FIRST_DMA_LINE;
@@ -286,7 +271,7 @@ int main(void)
 
 /* Pixel rendering is covered by ted-pixel-test.c. */
 void ted_draw_freeze(CLOCK delta) {}
-void ted_draw_begin_line(CLOCK clk) {}
+void ted_draw_begin_line(CLOCK clk, int shown) {}
 void ted_draw_line(CLOCK clk, int visible)
 {
     if (visible) { raster_line_emulate(&ted.raster); }

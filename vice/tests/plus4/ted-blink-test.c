@@ -11,10 +11,6 @@
 ted_t ted;
 CLOCK maincpu_clk;
 
-static raster_changes_t foreground, next_line;
-static raster_changes_all_t changes;
-static geometry_t geometry;
-
 static void at(unsigned int line, unsigned int cycle)
 {
     ted.ted_raster_counter = line;
@@ -36,13 +32,6 @@ static void end_of_blink_line(void)
 
 int main(void)
 {
-    memset(&foreground, 0, sizeof(foreground));
-    memset(&next_line, 0, sizeof(next_line));
-    changes.foreground = &foreground;
-    changes.next_line = &next_line;
-    ted.raster.changes = &changes;
-    geometry.text_size.width = TED_SCREEN_TEXTCOLS;
-    ted.raster.geometry = &geometry;
     ted.screen_height = 312;
 
     ted.cursor_phase = 0x03;
@@ -57,7 +46,6 @@ int main(void)
 
     /* A write after the increment is not incremented again. */
     at(205, 105);
-    foreground.count = 0;
     ted1f_store(9 << 3);
     assert(count() == 9);
     end_of_blink_line();
@@ -66,7 +54,6 @@ int main(void)
 
     /* Before the increment, the written value is incremented. */
     at(205, 50);
-    foreground.count = 0;
     ted1f_store(9 << 3);
     assert(count() == 9);
     end_of_blink_line();
@@ -78,7 +65,6 @@ int main(void)
     ted.cursor_phase = 0x0f;
     at(205, 104);
     assert(count() == 0);
-    foreground.count = 0;
     ted1f_store(15 << 3);
     assert(count() == 15);
     assert(ted.cursor_visible);
