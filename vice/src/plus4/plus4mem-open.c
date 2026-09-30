@@ -62,4 +62,3 @@ uint8_t *mem_get_open_space(void)
     }
     return open_space;
 }
-
