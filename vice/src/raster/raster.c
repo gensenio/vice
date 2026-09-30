@@ -259,6 +259,7 @@ int raster_init(raster_t *raster,
                 unsigned int num_modes)
 {
     raster->intialized = 0;
+    raster->line_output = NULL;
 
     raster->modes = lib_malloc(sizeof(raster_modes_t));
     raster_modes_init(raster->modes, num_modes);

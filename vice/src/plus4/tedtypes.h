@@ -37,6 +37,7 @@
 #define TED_SCREEN_YPIX                 200
 #define TED_SCREEN_TEXTCOLS             40
 #define TED_SCREEN_TEXTLINES            25
+#define TED_VIDEO_LINE_SIZE             592
 
 /*
 #define TED_40COL_START_PIXEL           0x20
@@ -285,6 +286,25 @@ struct ted_s {
     /* Horizontal-event state.  Clocks use the CPU double-clock unit. */
     CLOCK counter_clk;
     CLOCK counter_overflow_until;
+    /* Video already emitted on the physical line. $ff1e only moves the
+       counter, not this clock or the pixels preceding the write. */
+    CLOCK video_clk;
+    CLOCK video_line_clk;
+    CLOCK video_beam_position;
+    uint8_t video_line[TED_VIDEO_LINE_SIZE];
+    int video_changed;
+    int video_display;
+    int video_fetching;
+    int video_counting;
+    int video_shifting;
+    int video_blank;
+    unsigned int video_position;
+    unsigned int video_column;
+    uint8_t video_next_data, video_wait_data, video_shift_data;
+    uint8_t video_next_char, video_wait_char, video_pixel_char;
+    uint8_t video_next_attr, video_wait_attr, video_pixel_attr;
+    uint8_t video_next_cursor, video_wait_cursor, video_pixel_cursor;
+    unsigned int video_shift_phase;
     /* A horizontal counter write skipped the vertical counter increment:
        the line ends with its number unchanged.  */
     int line_repeat;

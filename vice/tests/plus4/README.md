@@ -1,5 +1,57 @@
 # TED regressions
 
+## Counter-controlled video output
+
+```sh
+sh tests/plus4/run-video-test.sh /path/to/configured/build
+CFLAGS='-g -fsanitize=address,undefined' sh tests/plus4/run-video-test.sh /path/to/configured/build
+sh tests/plus4/run-open-space-test.sh /path/to/configured/build
+```
+
+`ted-video.c` keeps pixels emitted before a horizontal-counter write, separate
+from the writable counter. Counter events control the border, bitmap fetch,
+attribute window and shifter independently. A rewind can extend the bitmap;
+skipping the stop leaves the window open and repeats the stopped bitmap
+position. Attributes stop after 40 cells. Ordinary lines retain the raster
+renderer and its cache; counter-controlled lines replace its output before
+the canvas refresh, including the final visible line of a frame.
+Keeping that output history adds CPU work on ordinary lines too, so warp
+throughput is lower than with the previous renderer.
+
+The unit test compiles the production video and counter handlers, substituting
+only RAM, alarm allocation/CPU notification and snapshot byte transport. It
+checks ordinary bitmap cells, preserved prefixes across jumps, extended
+graphics, the held byte, missing attributes, RAM write ordering, cross-standard
+chroma and pixel widths, a mid-line snapshot continuation, truncated snapshots,
+and every FF1E value in both phases. Snapshot version 1.14 saves the physical
+line, emitted pixels and pending shifter bytes. Older snapshots rebuild this
+state from their current counter and cannot recover an already emitted prefix.
+
+NTSC mode on a PAL machine retains the PAL crystal and TV standard. Its pixels
+are 4/5 as wide on the PAL output and its colour burst is incompatible: the
+picture is grayscale. Conversely PAL mode on an NTSC machine uses 5/4 pixel
+width. This corrects HNY2013's yellow-green, horizontally cropped output. The
+register colours themselves remain readable and unchanged.
+
+The unreachable initialization of the existing open-space fallback buffer is
+also corrected and runs once. Its accessor is isolated in `plus4mem-open.c` so
+the regression can compile it with sanitizers without the rest of the memory
+map. **The fallback pattern remains an approximation, not electrical open-bus
+emulation.** The streaming video path uses the last available CPU bus value for
+unconnected ROM fetches; the CPU core does not expose every bus cycle.
+
+Evidence and limits:
+
+- [TED preliminary data sheet](https://www.pagetable.com/docs/ted/TED%207360R0%20Preliminary%20Data%20Sheet.pdf): internal operation table and registers 7/30; [FPGATED](https://hackaday.io/project/11460-fpgated/details): independent fetch/shifter windows and counter-write phase preservation.
+- [Rockstar Ate My Border's author](https://plus4world.powweb.com/software/Rockstar_Ate_My_Border): 45 bitmap cells, 40 attribute cells, and repeating the final bitmap character in extended borders. The pattern now reaches both borders. Caption placement still differs from the release screenshot. TV horizontal sync recovery is not modeled, but the cause of the remaining difference is not established.
+- [HNY2013](https://plus4world.powweb.com/software/HNY2013) and its [source](https://github.com/litwr2/retro/tree/main/plus4/hny2013): NTSC-on-PAL grayscale border graphics. The crystal division also determines pixel width.
+- YapeSDL and plus4emu sources were analyzed under the authorization in `AGENTS.md`; no code was copied. Their fetch/output staging differs at individual-dot resolution. The pipeline uses VICE's four-dot clocks and two pending character stages; passing these tests is not a claim of individual-dot silicon accuracy.
+
+The SDL2 build was checked with 12 demos at 100/300/600 million clocks, the
+existing integration suite, Pets Rescue's pre-intro/menu and Lands of Zador
+gameplay using both 1541 and 1551. Cycle-limit completion checks crashes and
+CPU jams; sampled screenshots do not validate every demo part or disk change.
+
 Configure an SDL2 VICE build, then run from the source directory:
 
 ```sh

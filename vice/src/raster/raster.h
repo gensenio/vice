@@ -179,6 +179,9 @@ struct raster_s {
     int (*fill_sprite_cache)(struct raster_s *, struct raster_cache_s *,
                              unsigned int *, unsigned int *);
 
+    /* Optional chip output applied before the line is presented. */
+    void (*line_output)(struct raster_s *);
+
     int intialized;
 };
 typedef struct raster_s raster_t;

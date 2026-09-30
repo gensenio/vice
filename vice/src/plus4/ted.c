@@ -51,6 +51,7 @@
 #include "screenshot.h"
 #include "ted-cmdline-options.h"
 #include "ted-color.h"
+#include "ted-video.h"
 #include "ted-draw.h"
 #include "ted-counter.h"
 #include "ted-fetch.h"
@@ -172,6 +173,8 @@ void ted_freeze_update(void)
     from = ted.freeze_clk;
     ted.last_emulate_line_clk += delta;
     ted.counter_clk += delta;
+    ted.video_clk += delta;
+    ted.video_line_clk += delta;
     if (ted.draw_clk > from) {
         ted.draw_clk += delta;
     }
@@ -331,6 +334,7 @@ inline void ted_handle_pending_alarms(CLOCK num_write_cycles)
     while (maincpu_clk >= ted.draw_clk) {
         ted_raster_draw_alarm_handler(maincpu_clk - ted.draw_clk, NULL);
     }
+    ted_video_update(maincpu_clk);
     ted_counter_update(maincpu_clk);
 }
 
@@ -462,6 +466,7 @@ raster_t *ted_init(void)
     ted_update_memory_ptrs(0);
 
     ted_draw_init();
+    ted.raster.line_output = ted_video_draw_line;
 
     ted.initialized = 1;
 
@@ -500,6 +505,7 @@ void ted_reset(void)
 
     ted.last_emulate_line_clk = 0;
     ted.counter_clk = ted.counter_overflow_until = 0;
+    ted_video_reset(0);
     ted.line_repeat = 0;
     ted.clock_hold_end = 0;
     ted.fetch_clock_hold_end = 0;
@@ -881,15 +887,22 @@ static void ted_tv_line_alarm_handler(CLOCK offset, void *data)
    of each line.  */
 void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
 {
-    int repeat;
+    int repeat, video_changed;
 
     if (ted_freeze_defers(&ted.draw_clk)) {
         alarm_unset(ted.raster_draw_alarm);
         return;
     }
+    ted_video_update(ted.draw_clk);
     ted_counter_update(ted.draw_clk);
 
     if (ted.tv_current_line < ted.tv_height) {
+        video_changed = ted.video_changed
+            || (((ted.regs[0x07] & 0x40) != 0)
+                != (ted.tv_height == TED_NTSC_SCREEN_HEIGHT));
+        if (video_changed) {
+            ted.raster.dont_cache = 1;
+        }
         raster_line_emulate(&ted.raster);
     } else {
         /* Raster-counter writes can extend a frame beyond the canvas.  The
@@ -1028,6 +1041,7 @@ void ted_raster_draw_alarm_handler(CLOCK offset, void *data)
     }
 
     /* Set the next draw event.  */
+    ted_video_end_line(ted.draw_clk);
     ted.last_emulate_line_clk += ted.cycles_per_line;
     ted.draw_clk = ted.last_emulate_line_clk + ted.draw_cycle;
     alarm_set(ted.raster_draw_alarm, ted.draw_clk);

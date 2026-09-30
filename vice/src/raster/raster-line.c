@@ -655,6 +655,10 @@ void raster_line_emulate(raster_t *raster)
             }
         }
 
+        if (raster->line_output != NULL) {
+            raster->line_output(raster);
+        }
+
         if (++raster->num_cached_lines == (1
                                            + raster->geometry->last_displayed_line
                                            - raster->geometry->first_displayed_line)) {

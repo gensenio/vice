@@ -537,38 +537,6 @@ uint8_t mem_read_open_space(uint16_t addr)
     return addr >> 8;
 }
 
-/* HACK: the following is an ugly hack, which is needed because of how the non-sc
-         architecture works. Much of the TED emulation works on pointers that are
-         not reassigned/updated on ever access, which would be required to wrap to
-         the above function as needed. */
-
-/* NOTE: fortunately only the TED fetching is affected, so the difference made by
-         the pattern below is only on the visual result, and can not be detected
-         by the CPU in any way - that probably means that "close" is "good enough". */
-
-static uint8_t open_space[64 * 1024];
-static int open_space_initizialized = 0;
-
-uint8_t *mem_get_open_space(void)
-{
-    /* FIXME: this is even lesser than less correct :) */
-
-    int addr;
-    if (open_space_initizialized) {
-        for (addr = 0; addr < 0x10000; addr++) {
-            /* HACK: we can't really produce a "correct" pattern here. So this
-                     is just randomly tweaked a little to produce somewhat not
-                     completely stupid results in the tests */
-            open_space[addr] = ((addr >> 8) ^ 0xaa) ^ (addr ^ 0x55);
-            if ((addr & 7) == 0) {
-                if ((addr % (40 * 8 * 2)) < (40 * 8)) { open_space[addr] = 0x00; }
-                if ((addr % (40 * 8 * 2)) >= (40 * 8)) { open_space[addr] = 0xff; }
-            }
-        }
-    }
-    return open_space;
-}
-
 /* ------------------------------------------------------------------------- */
 
 /*
@@ -1685,4 +1653,3 @@ void plus4io_init(void)
     tcbm1_list_item = io_source_register(&tcbm1_device);
     tcbm2_list_item = io_source_register(&tcbm2_device);
 }
-

@@ -351,6 +351,7 @@ inline static void ted07_store(uint8_t value)
 
     /* Bit 6 selects NTSC mode.  */
     if ((old_value ^ value) & 0x40) {
+        ted.video_changed = 1;
         ted_set_ntsc_mode((value & 0x40) != 0);
     }
 
@@ -709,6 +710,7 @@ inline static void ted1c1d_store(uint16_t addr, uint8_t value)
 
 inline static void ted1e_store(uint8_t value)
 {
+    ted.video_changed = 1;
     ted_counter_store(value);
 }
 

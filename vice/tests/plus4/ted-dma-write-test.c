@@ -9,6 +9,7 @@
 #include "../../src/plus4/ted.c"
 #include "../../src/plus4/ted-timing.c"
 #include "../../src/plus4/ted-mem.c"
+#include "ted-video-stubs.h"
 
 CLOCK maincpu_clk;
 int maincpu_rmw_flag;

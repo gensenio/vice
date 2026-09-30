@@ -55,6 +55,7 @@ libplus4_a_SOURCES = \
 	plus4iec.h \
 	plus4io.c \
 	plus4mem.c \
+	plus4mem-open.c \
 	plus4mem.h \
 	plus4memcsory256k.c \
 	plus4memcsory256k.h \
@@ -111,6 +112,8 @@ libplus4_a_SOURCES = \
 	ted-timer.h \
 	ted-timing.c \
 	ted-timing.h \
+	ted-video.c \
+	ted-video.h \
 	ted.c \
 	ted.h \
 	tedtypes.h
